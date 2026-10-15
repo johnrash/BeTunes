@@ -1,0 +1,4 @@
+# build output (makefile-engine) and packages (attach those to a release)
+objects.*/
+package/*.hpkg
+package/pkg/
