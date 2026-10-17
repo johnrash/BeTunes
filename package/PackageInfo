@@ -1,5 +1,5 @@
 name			betunes
-version			1.0.1-1
+version			1.0.1-3
 architecture	x86_64
 summary			"A music player in the spirit of iTunes from the mid 2000s"
 description		"BeTunes is a music player for Haiku in the spirit of iTunes from the mid 2000s: a source list with the library, smart playlists and your playlists, a browser by artist and album, a sortable song list, live search, shuffle, repeat all and repeat one, a 10 band equalizer with presets, Get Info for editing the tags of one or many songs, a mini player, play counts and a status display with a seekable progress bar. It plays every format the installed media plug-ins decode: MP3, Ogg Vorbis, Opus, FLAC, AAC, WAV and more."

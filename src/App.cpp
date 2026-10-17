@@ -6,6 +6,9 @@
 #include <Application.h>
 #include <Entry.h>
 #include <Path.h>
+#include <TextView.h>
+
+#include <math.h>
 
 #include <vector>
 
@@ -13,6 +16,32 @@
 #include "EqualizerWindow.h"
 #include "MainWindow.h"
 #include "Settings.h"
+
+
+// BAboutWindow gives its text a fixed height and scrolls the rest: makes the
+// window tall enough to show all of it.
+static void
+fit_about_text(BAboutWindow* about)
+{
+	if (!about->Lock())
+		return;
+	about->Layout(true);
+	BTextView* info = dynamic_cast<BTextView*>(about->FindView("info"));
+	if (info != NULL) {
+		// BTextView scrolls by its text height plus insets, rounded up,
+		// minus the IntegerHeight() of its bounds (one less than the pixels)
+		float left, top, right, bottom;
+		info->GetInsets(&left, &top, &right, &bottom);
+		float needed = ceilf(info->TextRect().Height() + top + bottom);
+		float missing = needed - info->Bounds().IntegerHeight();
+		if (missing > 0) {
+			about->ResizeBy(0, missing);
+			BRect frame = about->Frame();
+			about->MoveTo(about->AboutPosition(frame.Width(), frame.Height()));
+		}
+	}
+	about->Unlock();
+}
 
 
 class App : public BApplication {
@@ -89,6 +118,7 @@ public:
 			"installed media plug-ins can decode: MP3, Ogg Vorbis, Opus, "
 			"FLAC, AAC, WAV and more.");
 		about->AddCopyright(2026, "BeTunes authors");
+		fit_about_text(about);
 		about->Show();
 	}
 
