@@ -229,7 +229,7 @@ The application is `objects.x86_64-cc13-release/BeTunes`. To build the
 package:
 
     bash package/build-package.sh
-    pkgman install package/betunes-1.0.1-3-x86_64.hpkg
+    pkgman install package/betunes-1.0.1-4-x86_64.hpkg
 
 The package puts BeTunes in the Deskbar's Applications menu; BeTunes also
 appears in Tracker's "Open with" menu for audio files and folders.

@@ -494,15 +494,25 @@ draw_glyph(BView* view, BRect rect, glyph which, rgb_color color)
 
 		case GLYPH_WARNING:
 		{
-			view->FillEllipse(at(r, 0.5f, 0.5f), s * 0.45f, s * 0.45f);
+			// a "!" of whole pixels (bar, gap, square dot) and the disc
+			// centered on it: FillEllipse() put the disc on its own grid,
+			// half a pixel right of the mark at small sizes
+			float thickness = std::max(2.0f, roundf(s * 0.12f));
+			float gap = std::max(1.0f, roundf(s * 0.08f));
+			float height = std::max(thickness * 2 + gap + 1,
+				roundf(s * 0.58f));
+			float left = roundf(r.left + s / 2 - (thickness - 1) / 2);
+			float top = roundf(r.top + s / 2 - (height - 1) / 2);
+			float bottom = top + height - 1;
+			float right = left + thickness - 1;
+			BPoint center((left + right) / 2, (top + bottom) / 2);
+			circle(view, center, s * 0.45f + 0.5f, true);
+				// as large as FillEllipse() made it
 			view->SetHighColor(255, 255, 255);
-			float w = std::max(1.0f, s * 0.12f);
-			float barBottom = roundf(r.top + s * 0.6f);
-			float dotTop = std::max(roundf(r.top + s * 0.68f), barBottom + 2);
-			box(view, BRect(r.left + s / 2 - w / 2, r.top + s * 0.22f,
-				r.left + s / 2 + w / 2, barBottom));
-			box(view, BRect(r.left + s / 2 - w / 2, dotTop,
-				r.left + s / 2 + w / 2, dotTop + w));
+			view->FillRect(BRect(left, top, right,
+				bottom - thickness - gap));
+			view->FillRect(BRect(left, bottom - thickness + 1, right,
+				bottom));
 			break;
 		}
 	}
