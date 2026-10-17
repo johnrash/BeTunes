@@ -9,6 +9,7 @@
 #include <IconUtils.h>
 #include <MessageRunner.h>
 #include <Resources.h>
+#include <Shape.h>
 #include <Window.h>
 
 #include <math.h>
@@ -30,6 +31,19 @@ static const rgb_color kSecondaryText = { 72, 78, 64, 255 };
 static const rgb_color kBarFrame = { 70, 74, 62, 255 };
 static const rgb_color kBarFill = { 105, 110, 96, 255 };
 static const rgb_color kBarBackground = { 236, 239, 222, 255 };
+
+
+// The ink of a string drawn at the origin, in pixel edges: it covers the
+// columns left to right - 1 and the rows top to bottom - 1.
+static BRect
+ink_bounds(const BFont& font, const char* string)
+{
+	const char* strings[1] = { string };
+	escapement_delta delta = { 0, 0 };
+	BRect box;
+	font.GetBoundingBoxesForStrings(strings, 1, B_SCREEN_METRIC, &delta, &box);
+	return box;
+}
 
 
 StatusDisplay::StatusDisplay(const char* name)
@@ -173,6 +187,15 @@ StatusDisplay::_LineHeight() const
 }
 
 
+BFont
+StatusDisplay::_TimeFont() const
+{
+	BFont font(be_plain_font);
+	font.SetSize(be_plain_font->Size() * 0.92f);
+	return font;
+}
+
+
 BRect
 StatusDisplay::_ScreenRect() const
 {
@@ -187,9 +210,12 @@ StatusDisplay::_BarRect() const
 	float line = _LineHeight();
 	float timeWidth = ceilf(be_plain_font->StringWidth("-00:00:00")) + 6;
 	float height = std::max(7.0f, floorf(line * 0.5f));
-	float middle = floorf(screen.top + 6 + line * 2.5f);
-	return BRect(screen.left + timeWidth + 8, middle - height / 2,
-		screen.right - timeWidth - 8, middle + height / 2 - 1);
+	// rows of the same parity as the digits' can center them exactly
+	if (fmodf(height - ink_bounds(_TimeFont(), "0123456789").Height(), 2) != 0)
+		height++;
+	float top = floorf(screen.top + 6 + line * 2.5f) - ceilf(height / 2);
+	return BRect(screen.left + timeWidth + 8, top,
+		screen.right - timeWidth - 8, top + height - 1);
 }
 
 
@@ -206,8 +232,11 @@ StatusDisplay::_RightTimeRect() const
 float
 StatusDisplay::_FractionAt(BPoint where) const
 {
+	// the middle of the pixel on the track between the frame's inner edges,
+	// as in Draw()
 	BRect bar = _BarRect();
-	float fraction = (where.x - bar.left) / std::max(1.0f, bar.Width());
+	float fraction = (where.x + 0.5f - (bar.left + 1))
+		/ std::max(1.0f, bar.Width() - 1);
 	return std::max(0.0f, std::min(1.0f, fraction));
 }
 
@@ -310,43 +339,57 @@ StatusDisplay::Draw(BRect update)
 	float fraction = fDuration > 0 ? (float)position / fDuration : 0;
 	fraction = std::max(0.0f, std::min(1.0f, fraction));
 
-	BFont small(be_plain_font);
-	small.SetSize(be_plain_font->Size() * 0.92f);
+	BFont small(_TimeFont());
 	SetFont(&small);
-	font_height smallHeight;
-	small.GetHeight(&smallHeight);
-	float timeBaseline = floorf((bar.top + bar.bottom) / 2
-		+ (smallHeight.ascent - smallHeight.descent) / 2);
 	SetHighColor(kText);
 	BString elapsed(format_duration(position).c_str());
+	BString right(format_duration(fShowRemaining ? fDuration - position
+		: fDuration).c_str());
+	// the digits centered on the bar, both times the same distance from its
+	// frame (the bar covers the columns left to right, its right edge is
+	// right + 1); by their advance, not their ink, so a ticking time stays
+	// put
+	BRect digits = ink_bounds(small, "0123456789");
+	float middle = bar.top + (bar.Height() + 1) / 2;
+	float timeBaseline = middle - (digits.top + digits.bottom) / 2;
 	DrawString(elapsed, BPoint(bar.left - 8 - StringWidth(elapsed),
 		timeBaseline));
-	BString right;
-	if (fShowRemaining)
-		right << "-" << format_duration(fDuration - position).c_str();
-	else
-		right = format_duration(fDuration).c_str();
-	DrawString(right, BPoint(bar.right + 8, timeBaseline));
+	float rightX = bar.right + 1 + 8;
+	if (fShowRemaining) {
+		// the font's hyphen sits below the middle of the digits: the
+		// remaining time's minus gets its own baseline that centers it
+		BRect minus = ink_bounds(small, "-");
+		float minusTop = roundf(middle - minus.Height() / 2);
+		DrawString("-", BPoint(rightX, minusTop - minus.top));
+		rightX += StringWidth("-");
+	}
+	DrawString(right, BPoint(rightX, timeBaseline));
 	SetFont(be_plain_font);
 
 	SetHighColor(kBarBackground);
 	FillRect(bar);
 	SetHighColor(kBarFrame);
 	StrokeRect(bar);
-	float x = floorf(bar.left + fraction * bar.Width());
+	// the fill ends at x, which travels between the frame's inner edges
+	float x = roundf(bar.left + 1 + fraction * (bar.Width() - 1));
 	SetHighColor(kBarFill);
 	if (x > bar.left + 1)
-		FillRect(BRect(bar.left + 1, bar.top + 1, x, bar.bottom - 1));
+		FillRect(BRect(bar.left + 1, bar.top + 1, x - 1, bar.bottom - 1));
 
-	// the diamond
+	// the diamond, centered on the end of the fill and the middle of the
+	// bar: a shape keeps its corners where they are put, FillPolygon()
+	// truncates them to pixel edges, which put it off the middle
 	float size = floorf(bar.Height() / 2) + 3;
-	float middle = (bar.top + bar.bottom) / 2;
-	BPoint diamond[4] = {
-		BPoint(x, middle - size), BPoint(x + size, middle),
-		BPoint(x, middle + size), BPoint(x - size, middle)
-	};
+	BShape diamond;
+	diamond.MoveTo(BPoint(x, middle - size));
+	diamond.LineTo(BPoint(x + size, middle));
+	diamond.LineTo(BPoint(x, middle + size));
+	diamond.LineTo(BPoint(x - size, middle));
+	diamond.Close();
 	SetHighColor(kText);
-	FillPolygon(diamond, 4);
+	// shapes are drawn relative to the pen, which DrawString() moved
+	MovePenTo(B_ORIGIN);
+	FillShape(&diamond);
 }
 
 

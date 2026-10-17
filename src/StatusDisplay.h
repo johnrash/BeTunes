@@ -51,6 +51,7 @@ public:
 
 private:
 			float				_LineHeight() const;
+			BFont				_TimeFont() const;
 			BRect				_ScreenRect() const;
 			BRect				_BarRect() const;
 			BRect				_RightTimeRect() const;

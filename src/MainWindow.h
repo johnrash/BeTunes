@@ -23,6 +23,7 @@
 
 
 class BFilePanel;
+class BLayoutItem;
 class BMenu;
 class BMenuBar;
 class BMenuItem;
@@ -195,8 +196,7 @@ private:
 			// the mini player: only the control bar
 			BMenuBar*			fMenuBar;
 			BView*				fBottomBar;
-			BView*				fSearchLabel;
-			BView*				fBrowseLabel;
+			BLayoutItem*		fSearchAndBrowse;
 			bool				fMiniPlayer;
 			bool				fMiniOnTop;
 			BRect				fFullFrame;

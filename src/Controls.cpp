@@ -149,7 +149,7 @@ TransportButton::Draw(BRect update)
 	float size = std::min(bounds.Width(), bounds.Height()) - 2;
 	BRect circle(0, 0, size, size);
 	circle.OffsetTo(floorf((bounds.Width() - size) / 2),
-		floorf((bounds.Height() - size) / 2) - 0.5f);
+		floorf((bounds.Height() - size) / 2));
 
 	rgb_color base = ui_color(B_PANEL_BACKGROUND_COLOR);
 	bool pressed = fPressed && IsEnabled();
@@ -194,8 +194,10 @@ TransportButton::Draw(BRect update)
 	float inset = body.Width() * (fSymbol == GLYPH_PLAY
 		|| fSymbol == GLYPH_PAUSE ? 0.28f : 0.24f);
 	BRect symbol = body.InsetByCopy(inset, inset);
-	if (fSymbol == GLYPH_PLAY)
-		symbol.OffsetBy(body.Width() * 0.04f, 0);
+	if (fSymbol == GLYPH_PLAY) {
+		// puts the triangle's centroid in the middle, which looks centered
+		symbol.OffsetBy(body.Width() * 0.02f, 0);
+	}
 	draw_glyph(this, symbol, fSymbol, color);
 }
 
@@ -528,8 +530,8 @@ IconButton::Draw(BRect update)
 	BRect bounds = Bounds();
 	float size = floorf(bounds.Height() * 0.62f);
 	BRect glyphRect(0, 0, size, size);
-	glyphRect.OffsetTo(floorf((bounds.Width() - size) / 2),
-		floorf((bounds.Height() - size) / 2));
+	glyphRect.OffsetTo((bounds.Width() - size) / 2,
+		(bounds.Height() - size) / 2);
 	draw_glyph(this, glyphRect, fSymbol, color);
 }
 

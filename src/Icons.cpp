@@ -29,6 +29,14 @@ mix(rgb_color a, rgb_color b, uint8 amount)
 namespace {
 
 
+// app_server puts shape coordinates on pixel edges, but rects and ellipses on
+// pixel indices (x is the middle of pixel x). Moving the pen to kPixelCenter
+// shifts shapes onto the index grid, and box() rounds the rect instead of
+// letting app_server truncate it: the parts of a glyph line up with each
+// other and stay centered in the rect the caller computed.
+const BPoint kPixelCenter(0.5f, 0.5f);
+
+
 // A square of the rect's smaller side, centered in it.
 BRect
 square(BRect rect)
@@ -47,6 +55,17 @@ at(BRect r, float x, float y)
 }
 
 
+// The pixel edge nearest to a shape coordinate (with the pen at kPixelCenter
+// edges are at n - 0.5): straight sides on whole pixels look sharp. Snap the
+// side above a center and mirror it (2 * center - top) for the side below to
+// keep the shape symmetric.
+float
+snap(float coordinate)
+{
+	return roundf(coordinate + 0.5f) - 0.5f;
+}
+
+
 void
 triangle(BView* view, BPoint a, BPoint b, BPoint c)
 {
@@ -60,11 +79,90 @@ triangle(BView* view, BPoint a, BPoint b, BPoint c)
 
 
 void
-arrow_head(BView* view, BPoint tip, float angle, float size)
+box(BView* view, BRect rect)
 {
-	BPoint back(tip.x - cosf(angle) * size, tip.y - sinf(angle) * size);
-	BPoint side(-sinf(angle) * size * 0.6f, cosf(angle) * size * 0.6f);
-	triangle(view, tip, back + side, back - side);
+	view->FillRect(BRect(roundf(rect.left), roundf(rect.top),
+		roundf(rect.right), roundf(rect.bottom)));
+}
+
+
+// StrokeLine() would align to its own grid and move the pen.
+void
+line(BView* view, BPoint a, BPoint b)
+{
+	BShape shape;
+	shape.MoveTo(a);
+	shape.LineTo(b);
+	view->StrokeShape(&shape);
+}
+
+
+// A circular arc of up to about 120 degrees as one Bezier curve; angles in
+// degrees, counterclockwise from three o'clock as in BView::StrokeArc().
+void
+add_arc(BShape& shape, BPoint center, float radius, float start, float span,
+	bool move)
+{
+	float a0 = start * M_PI / 180;
+	float a1 = (start + span) * M_PI / 180;
+	float k = 4.0f / 3.0f * tanf((a1 - a0) / 4) * radius;
+	BPoint p0(center.x + radius * cosf(a0), center.y - radius * sinf(a0));
+	BPoint p1(center.x + radius * cosf(a1), center.y - radius * sinf(a1));
+	if (move)
+		shape.MoveTo(p0);
+	shape.BezierTo(BPoint(p0.x - k * sinf(a0), p0.y - k * cosf(a0)),
+		BPoint(p1.x + k * sinf(a1), p1.y + k * cosf(a1)), p1);
+}
+
+
+void
+arc(BView* view, BPoint center, float radius, float start, float span)
+{
+	BShape shape;
+	add_arc(shape, center, radius, start, span, true);
+	view->StrokeShape(&shape);
+}
+
+
+void
+circle(BView* view, BPoint center, float radius, bool fill)
+{
+	BShape shape;
+	for (int i = 0; i < 4; i++)
+		add_arc(shape, center, radius, i * 90, 90, i == 0);
+	shape.Close();
+	if (fill)
+		view->FillShape(&shape);
+	else
+		view->StrokeShape(&shape);
+}
+
+
+// The middle of a line of a whole-pixel pen on the pixel grid, a pixel's
+// middle for odd pens and a pixel edge for even ones: its sides are sharp.
+float
+on_grid(float coordinate, float pen)
+{
+	return fmodf(pen, 2) != 0 ? roundf(coordinate) : snap(coordinate);
+}
+
+
+// An arrowhead on a horizontal line put on the grid with on_grid(),
+// pointing left or right; its base and corners fall on pixel edges.
+void
+arrow(BView* view, float tip, float base, float row, float pen, float length)
+{
+	float half = fmodf(pen, 2) != 0 ? floorf(length * 0.6f) + 0.5f
+		: roundf(length * 0.6f);
+	triangle(view, BPoint(tip, row), BPoint(base, row - half),
+		BPoint(base, row + half));
+}
+
+
+BPoint
+half_turn(BPoint point, BPoint center)
+{
+	return BPoint(2 * center.x - point.x, 2 * center.y - point.y);
 }
 
 
@@ -85,8 +183,8 @@ draw_note(BView* view, BRect r, rgb_color color)
 	float x2 = head2.x + rx - stem;
 	float top1 = r.top + s * 0.24f;
 	float top2 = r.top + s * 0.14f;
-	view->FillRect(BRect(x1, top1, x1 + stem, head1.y));
-	view->FillRect(BRect(x2, top2, x2 + stem, head2.y));
+	box(view, BRect(x1, top1, x1 + stem, head1.y));
+	box(view, BRect(x2, top2, x2 + stem, head2.y));
 
 	BShape beam;
 	float thickness = s * 0.14f;
@@ -118,14 +216,14 @@ rounded_tile(BView* view, BRect r, rgb_color top, rgb_color bottom)
 
 // Shapes are drawn relative to the pen location (BColumnListView, for one,
 // moves the pen before drawing a field): every function here starts with
-// PushState() and MovePenTo(B_ORIGIN).
+// PushState() and MovePenTo(kPixelCenter).
 
 
 void
 draw_glyph(BView* view, BRect rect, glyph which, rgb_color color)
 {
 	view->PushState();
-	view->MovePenTo(B_ORIGIN);
+	view->MovePenTo(kPixelCenter);
 	view->SetDrawingMode(B_OP_ALPHA);
 	view->SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
 	view->SetHighColor(color);
@@ -136,17 +234,32 @@ draw_glyph(BView* view, BRect rect, glyph which, rgb_color color)
 
 	switch (which) {
 		case GLYPH_PLAY:
-			triangle(view, at(r, 0.22f, 0.1f), at(r, 0.22f, 0.9f),
-				at(r, 0.92f, 0.5f));
+		{
+			float middle = r.top + s / 2;
+			float left = snap(r.left + s * 0.22f);
+			float top = snap(middle - s * 0.4f);
+			triangle(view, BPoint(left, top), BPoint(left, 2 * middle - top),
+				BPoint(r.left + s * 0.92f, middle));
 			break;
+		}
 
 		case GLYPH_PAUSE:
-			view->FillRect(BRect(at(r, 0.18f, 0.12f), at(r, 0.42f, 0.88f)));
-			view->FillRect(BRect(at(r, 0.58f, 0.12f), at(r, 0.82f, 0.88f)));
+		{
+			// pixel columns mirrored around the middle, at least one apart
+			float middle = r.left + s / 2;
+			float outer = roundf(middle - s * 0.32f);
+			float inner = std::min(roundf(middle - s * 0.08f),
+				floorf(middle - 1));
+			float top = roundf(r.top + s * 0.12f);
+			float bottom = 2 * (r.top + s / 2) - top;
+			view->FillRect(BRect(outer, top, inner, bottom));
+			view->FillRect(BRect(2 * middle - inner, top, 2 * middle - outer,
+				bottom));
 			break;
+		}
 
 		case GLYPH_PREVIOUS:
-			view->FillRect(BRect(at(r, 0.04f, 0.2f), at(r, 0.14f, 0.8f)));
+			box(view, BRect(at(r, 0.04f, 0.2f), at(r, 0.14f, 0.8f)));
 			triangle(view, at(r, 0.14f, 0.5f), at(r, 0.56f, 0.2f),
 				at(r, 0.56f, 0.8f));
 			triangle(view, at(r, 0.54f, 0.5f), at(r, 0.96f, 0.2f),
@@ -158,99 +271,139 @@ draw_glyph(BView* view, BRect rect, glyph which, rgb_color color)
 				at(r, 0.46f, 0.5f));
 			triangle(view, at(r, 0.44f, 0.2f), at(r, 0.44f, 0.8f),
 				at(r, 0.86f, 0.5f));
-			view->FillRect(BRect(at(r, 0.86f, 0.2f), at(r, 0.96f, 0.8f)));
+			box(view, BRect(at(r, 0.86f, 0.2f), at(r, 0.96f, 0.8f)));
 			break;
 
 		case GLYPH_SPEAKER:
 		case GLYPH_SPEAKER_LOUD:
 		{
+			float middle = r.top + s / 2;
+			float back = snap(r.left + s * 0.08f);
+			float neck = r.left + s * 0.28f;
+			float front = snap(r.left + s * 0.52f);
+			float boxTop = snap(middle - s * 0.14f);
+			float coneTop = snap(middle - s * 0.36f);
 			BShape body;
-			body.MoveTo(at(r, 0.08f, 0.36f));
-			body.LineTo(at(r, 0.28f, 0.36f));
-			body.LineTo(at(r, 0.52f, 0.14f));
-			body.LineTo(at(r, 0.52f, 0.86f));
-			body.LineTo(at(r, 0.28f, 0.64f));
-			body.LineTo(at(r, 0.08f, 0.64f));
+			body.MoveTo(BPoint(back, boxTop));
+			body.LineTo(BPoint(neck, boxTop));
+			body.LineTo(BPoint(front, coneTop));
+			body.LineTo(BPoint(front, 2 * middle - coneTop));
+			body.LineTo(BPoint(neck, 2 * middle - boxTop));
+			body.LineTo(BPoint(back, 2 * middle - boxTop));
 			body.Close();
 			view->FillShape(&body);
 			if (which == GLYPH_SPEAKER_LOUD) {
+				// shapes rather than StrokeArc(), which centers arcs on its
+				// own grid and put the waves below the cone
 				view->SetPenSize(std::max(1.0f, s * 0.08f));
 				BPoint center = at(r, 0.5f, 0.5f);
-				view->StrokeArc(center, s * 0.18f, s * 0.18f, -45, 90);
-				view->StrokeArc(center, s * 0.34f, s * 0.34f, -50, 100);
+				arc(view, center, s * 0.18f, -45, 90);
+				arc(view, center, s * 0.34f, -50, 100);
 			}
 			break;
 		}
 
 		case GLYPH_SHUFFLE:
 		{
-			float pen = std::max(1.4f, s * 0.11f);
+			// two lines swapping rows between straight ends, mirrored top
+			// to bottom. A whole-pixel pen on the grid keeps the straight
+			// parts sharp (a fractional one smeared them over two rows);
+			// the loose ends and the arrowhead bases are on pixel edges.
+			float pen = std::max(1.0f, roundf(s * 0.085f));
+			float middle = r.top + s / 2;
+			float upper = on_grid(r.top + s * 0.25f, pen);
+			float lower = 2 * middle - upper;
+			float start = snap(r.left + s * 0.04f);
+			float bend = r.left + s * 0.2f;
+			float tip = snap(r.right);
+			float length = std::max(3.0f, roundf(s * 0.3f));
+			float base = tip - length;
+			float control = (bend + base) / 2;
 			view->SetPenSize(pen);
-			BShape down;
-			down.MoveTo(at(r, 0.04f, 0.27f));
-			down.LineTo(at(r, 0.2f, 0.27f));
-			BPoint control[3] = { at(r, 0.44f, 0.27f), at(r, 0.46f, 0.73f),
-				at(r, 0.7f, 0.73f) };
-			down.BezierTo(control);
-			view->StrokeShape(&down);
-			BShape up;
-			up.MoveTo(at(r, 0.04f, 0.73f));
-			up.LineTo(at(r, 0.2f, 0.73f));
-			BPoint control2[3] = { at(r, 0.44f, 0.73f), at(r, 0.46f, 0.27f),
-				at(r, 0.7f, 0.27f) };
-			up.BezierTo(control2);
-			view->StrokeShape(&up);
-			view->SetPenSize(1);
-			arrow_head(view, at(r, 1.0f, 0.73f), 0, s * 0.32f);
-			arrow_head(view, at(r, 1.0f, 0.27f), 0, s * 0.32f);
+			view->SetLineMode(B_BUTT_CAP, B_ROUND_JOIN);
+			for (int i = 0; i < 2; i++) {
+				float from = i == 0 ? upper : lower;
+				float to = i == 0 ? lower : upper;
+				BShape line;
+				line.MoveTo(BPoint(start, from));
+				line.LineTo(BPoint(bend, from));
+				line.BezierTo(BPoint(control, from), BPoint(control, to),
+					BPoint(base, to));
+				view->StrokeShape(&line);
+				arrow(view, tip, base, to, pen, length);
+			}
 			break;
 		}
 
 		case GLYPH_REPEAT:
 		case GLYPH_REPEAT_ONE:
 		{
-			// two arrows chasing each other around a loop
-			float pen = std::max(1.4f, s * 0.11f);
+			// two halves of a loop, half a turn apart, each ending in an
+			// arrowhead; a whole-pixel pen, rows, columns and corner radius
+			// keep the straight parts sharp, as for the shuffle glyph
+			float pen = std::max(1.0f, roundf(s * 0.085f));
+			BPoint center(r.left + s / 2, r.top + s / 2);
+			float top = on_grid(r.top + s * 0.2f, pen);
+			float left = on_grid(r.left + s * 0.12f, pen);
+			float radius = std::max(1.0f, roundf(s * 0.2f));
+			float k = radius * 0.5523f;
+				// the control point distance for a quarter circle
+			float open = snap(r.top + s * 0.62f);
+			float tip = snap(r.right - s * 0.04f);
+			float length = std::max(3.0f, roundf(s * 0.3f));
+			float base = tip - length;
 			view->SetPenSize(pen);
-			BShape top;
-			top.MoveTo(at(r, 0.12f, 0.6f));
-			top.LineTo(at(r, 0.12f, 0.44f));
-			BPoint c1[3] = { at(r, 0.12f, 0.28f), at(r, 0.18f, 0.24f),
-				at(r, 0.32f, 0.24f) };
-			top.BezierTo(c1);
-			top.LineTo(at(r, 0.72f, 0.24f));
-			view->StrokeShape(&top);
-			BShape bottom;
-			bottom.MoveTo(at(r, 0.88f, 0.4f));
-			bottom.LineTo(at(r, 0.88f, 0.56f));
-			BPoint c2[3] = { at(r, 0.88f, 0.72f), at(r, 0.82f, 0.76f),
-				at(r, 0.68f, 0.76f) };
-			bottom.BezierTo(c2);
-			bottom.LineTo(at(r, 0.28f, 0.76f));
-			view->StrokeShape(&bottom);
-			view->SetPenSize(1);
-			arrow_head(view, at(r, 0.96f, 0.24f), 0, s * 0.3f);
-			arrow_head(view, at(r, 0.04f, 0.76f), M_PI, s * 0.3f);
+			view->SetLineMode(B_BUTT_CAP, B_ROUND_JOIN);
+			for (int i = 0; i < 2; i++) {
+				BPoint points[6] = {
+					BPoint(left, open), BPoint(left, top + radius),
+					BPoint(left, top + radius - k),
+					BPoint(left + radius - k, top), BPoint(left + radius, top),
+					BPoint(base, top)
+				};
+				if (i == 1) {
+					for (int j = 0; j < 6; j++)
+						points[j] = half_turn(points[j], center);
+				}
+				BShape half;
+				half.MoveTo(points[0]);
+				half.LineTo(points[1]);
+				half.BezierTo(points[2], points[3], points[4]);
+				half.LineTo(points[5]);
+				view->StrokeShape(&half);
+			}
+			arrow(view, tip, base, top, pen, length);
+			arrow(view, 2 * center.x - tip, 2 * center.x - base,
+				2 * center.y - top, pen, length);
 			if (which == GLYPH_REPEAT_ONE) {
-				// a "1" inside the loop
-				float stroke = std::max(1.2f, s * 0.1f);
-				BPoint center = at(r, 0.5f, 0.5f);
-				float half = s * 0.17f;
-				view->FillRect(BRect(center.x - stroke / 2, center.y - half,
-					center.x + stroke / 2, center.y + half));
-				view->FillRect(BRect(center.x - stroke * 1.6f, center.y - half,
-					center.x, center.y - half + stroke));
+				// a "1" in the loop, a pixel clear of its lines: rows are
+				// pixel indices from the line's lower edge (top + pen / 2)
+				float stem = std::max(1.0f, roundf(s * 0.08f));
+				float column = roundf(center.x - (stem - 1) / 2);
+				float first = top + pen / 2 + 1.5f;
+				float last = 2 * center.y - first;
+				view->FillRect(BRect(column, first, column + stem - 1, last));
+				view->FillRect(BRect(column - stem, first, column - 1,
+					first + stem - 1));
 			}
 			break;
 		}
 
 		case GLYPH_PLUS:
 		{
-			float pen = std::max(1.5f, s * 0.14f);
-			view->FillRect(BRect(r.left + s * 0.14f, r.top + s / 2 - pen / 2,
-				r.right - s * 0.14f, r.top + s / 2 + pen / 2));
-			view->FillRect(BRect(r.left + s / 2 - pen / 2, r.top + s * 0.14f,
-				r.left + s / 2 + pen / 2, r.bottom - s * 0.14f));
+			// two bars of the same whole-pixel thickness and length crossing
+			// in their middles: rounded each on its own, they came out 2 and
+			// 3 pixels thick when the middle was a pixel edge one way and a
+			// pixel center the other. The cross moves by up to half a pixel
+			// to fit the pixel grid both ways.
+			float thickness = std::max(1.0f, roundf(s * 0.15f));
+			float arm = std::max(1.0f, roundf((s * 0.72f - thickness) / 2));
+			float left = roundf(r.left + s / 2 - (thickness - 1) / 2);
+			float top = roundf(r.top + s / 2 - (thickness - 1) / 2);
+			float right = left + thickness - 1;
+			float bottom = top + thickness - 1;
+			view->FillRect(BRect(left - arm, top, right + arm, bottom));
+			view->FillRect(BRect(left, top - arm, right, bottom + arm));
 			break;
 		}
 
@@ -261,24 +414,45 @@ draw_glyph(BView* view, BRect rect, glyph which, rgb_color color)
 			BPoint center = at(r, 0.42f, 0.42f);
 			view->StrokeEllipse(center, s * 0.27f, s * 0.27f);
 			view->SetPenSize(pen * 1.4f);
-			view->StrokeLine(at(r, 0.64f, 0.64f), at(r, 0.88f, 0.88f));
+			line(view, at(r, 0.64f, 0.64f), at(r, 0.88f, 0.88f));
 			break;
 		}
 
 		case GLYPH_EYE:
 		{
-			BShape outline;
-			outline.MoveTo(at(r, 0.04f, 0.5f));
-			BPoint top[3] = { at(r, 0.3f, 0.12f), at(r, 0.7f, 0.12f),
-				at(r, 0.96f, 0.5f) };
-			outline.BezierTo(top);
-			BPoint bottom[3] = { at(r, 0.7f, 0.88f), at(r, 0.3f, 0.88f),
-				at(r, 0.04f, 0.5f) };
-			outline.BezierTo(bottom);
-			outline.Close();
-			view->SetPenSize(std::max(1.0f, s * 0.08f));
-			view->StrokeShape(&outline);
-			view->FillEllipse(at(r, 0.5f, 0.5f), s * 0.17f, s * 0.17f);
+			// lids with a heavier lash line on top around a lightly toned
+			// eyeball, the iris, the pupil and a catchlight
+			BPoint center = at(r, 0.5f, 0.5f);
+			BPoint inner = at(r, 0.02f, 0.5f);
+			BPoint outer = at(r, 0.98f, 0.5f);
+			BShape lashLine;
+			lashLine.MoveTo(inner);
+			lashLine.BezierTo(at(r, 0.27f, 0.09f), at(r, 0.73f, 0.09f), outer);
+			BShape lids(lashLine);
+			lids.BezierTo(at(r, 0.73f, 0.91f), at(r, 0.27f, 0.91f), inner);
+			lids.Close();
+
+			rgb_color tone = color;
+			tone.alpha = color.alpha * 30 / 255;
+			view->SetHighColor(tone);
+			view->FillShape(&lids);
+			float pen = std::max(1.0f, s * 0.075f);
+			view->SetHighColor(color);
+			view->SetPenSize(pen);
+			view->StrokeShape(&lids);
+			view->SetPenSize(pen * 1.8f);
+			view->StrokeShape(&lashLine);
+
+			tone.alpha = color.alpha * 120 / 255;
+			view->SetHighColor(tone);
+			circle(view, center, s * 0.2f, true);
+			view->SetHighColor(color);
+			circle(view, center, s * 0.1f, true);
+
+			view->SetHighColor(color.IsLight() ? make_color(0, 0, 0, 150)
+				: make_color(255, 255, 255, 230));
+			circle(view, BPoint(center.x - s * 0.07f, center.y - s * 0.07f),
+				std::max(0.8f, s * 0.05f), true);
 			break;
 		}
 
@@ -287,27 +461,33 @@ draw_glyph(BView* view, BRect rect, glyph which, rgb_color color)
 			view->FillEllipse(at(r, 0.5f, 0.5f), s * 0.5f, s * 0.5f);
 			view->SetHighColor(255, 255, 255);
 			view->SetPenSize(std::max(1.2f, s * 0.13f));
-			view->StrokeLine(at(r, 0.32f, 0.32f), at(r, 0.68f, 0.68f));
-			view->StrokeLine(at(r, 0.68f, 0.32f), at(r, 0.32f, 0.68f));
+			line(view, at(r, 0.32f, 0.32f), at(r, 0.68f, 0.68f));
+			line(view, at(r, 0.68f, 0.32f), at(r, 0.32f, 0.68f));
 			break;
 		}
 
 		case GLYPH_EQUALIZER:
 		{
-			// three sliders at different heights
-			float pen = std::max(1.0f, s * 0.08f);
-			float knobWidth = s * 0.26f;
-			float knobHeight = std::max(2.0f, s * 0.16f);
-			const float xs[3] = { 0.2f, 0.5f, 0.8f };
+			// three sliders at different heights, on whole pixel columns:
+			// stems and knobs of odd widths centered on them, and knobs at
+			// least a pixel narrower than the spacing so they stay apart
+			float middle = floorf(r.left + s / 2);
+			float spacing = std::max(4.0f, roundf(s * 0.3f));
+			float stem = 1 + 2 * floorf(s * 0.04f);
+			float knob = 1 + 2 * floorf(s * 0.13f);
+			float widest = spacing - 1 - fmodf(spacing, 2);
+			knob = std::max(stem, std::min(knob, widest));
+			float knobHeight = std::max(2.0f, roundf(s * 0.16f));
+			float top = roundf(r.top + s * 0.06f);
+			float bottom = 2 * (r.top + s / 2) - top;
 			const float ys[3] = { 0.66f, 0.32f, 0.54f };
 			for (int i = 0; i < 3; i++) {
-				BPoint top = at(r, xs[i], 0.06f);
-				view->FillRect(BRect(top.x - pen / 2, top.y, top.x + pen / 2,
-					r.top + s * 0.94f));
-				BPoint knob = at(r, xs[i], ys[i]);
-				view->FillRoundRect(BRect(knob.x - knobWidth / 2,
-					knob.y - knobHeight / 2, knob.x + knobWidth / 2,
-					knob.y + knobHeight / 2), 1, 1);
+				float x = middle + (i - 1) * spacing;
+				view->FillRect(BRect(x - (stem - 1) / 2, top,
+					x + (stem - 1) / 2, bottom));
+				float knobTop = roundf(r.top + s * ys[i] - knobHeight / 2);
+				view->FillRect(BRect(x - (knob - 1) / 2, knobTop,
+					x + (knob - 1) / 2, knobTop + knobHeight - 1));
 			}
 			break;
 		}
@@ -317,10 +497,12 @@ draw_glyph(BView* view, BRect rect, glyph which, rgb_color color)
 			view->FillEllipse(at(r, 0.5f, 0.5f), s * 0.45f, s * 0.45f);
 			view->SetHighColor(255, 255, 255);
 			float w = std::max(1.0f, s * 0.12f);
-			view->FillRect(BRect(r.left + s / 2 - w / 2, r.top + s * 0.22f,
-				r.left + s / 2 + w / 2, r.top + s * 0.6f));
-			view->FillRect(BRect(r.left + s / 2 - w / 2, r.top + s * 0.68f,
-				r.left + s / 2 + w / 2, r.top + s * 0.68f + w));
+			float barBottom = roundf(r.top + s * 0.6f);
+			float dotTop = std::max(roundf(r.top + s * 0.68f), barBottom + 2);
+			box(view, BRect(r.left + s / 2 - w / 2, r.top + s * 0.22f,
+				r.left + s / 2 + w / 2, barBottom));
+			box(view, BRect(r.left + s / 2 - w / 2, dotTop,
+				r.left + s / 2 + w / 2, dotTop + w));
 			break;
 		}
 	}
@@ -333,7 +515,7 @@ void
 draw_library_icon(BView* view, BRect rect)
 {
 	view->PushState();
-	view->MovePenTo(B_ORIGIN);
+	view->MovePenTo(kPixelCenter);
 	view->SetDrawingMode(B_OP_ALPHA);
 	view->SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
 	BRect r = square(rect);
@@ -349,13 +531,14 @@ void
 draw_playlist_icon(BView* view, BRect rect)
 {
 	view->PushState();
-	view->MovePenTo(B_ORIGIN);
+	view->MovePenTo(kPixelCenter);
 	view->SetDrawingMode(B_OP_ALPHA);
 	view->SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
 	BRect r = square(rect);
+	// the library icon's note, in the playlist colors
 	rounded_tile(view, r, make_color(250, 252, 255, 255),
 		make_color(190, 210, 235, 255));
-	draw_note(view, r.InsetByCopy(r.Width() * 0.14f, r.Width() * 0.14f),
+	draw_note(view, r.InsetByCopy(r.Width() * 0.12f, r.Width() * 0.12f),
 		make_color(40, 100, 200, 255));
 	view->PopState();
 }
@@ -365,7 +548,7 @@ void
 draw_smart_playlist_icon(BView* view, BRect rect)
 {
 	view->PushState();
-	view->MovePenTo(B_ORIGIN);
+	view->MovePenTo(kPixelCenter);
 	view->SetDrawingMode(B_OP_ALPHA);
 	view->SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
 	BRect r = square(rect);

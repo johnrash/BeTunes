@@ -222,8 +222,7 @@ MainWindow::MainWindow(const BMessage& settings)
 	fMiniOnTopItem(NULL),
 	fMenuBar(NULL),
 	fBottomBar(NULL),
-	fSearchLabel(NULL),
-	fBrowseLabel(NULL),
+	fSearchAndBrowse(NULL),
 	fMiniPlayer(false),
 	fMiniOnTop(false),
 	fSourceKind(SOURCE_LIBRARY),
@@ -342,6 +341,7 @@ MainWindow::_BuildLayout()
 	fBrowseButton->SetValue(B_CONTROL_ON);
 
 	BarView* controlBar = new BarView("control bar", B_HORIZONTAL, true);
+	BGroupLayout* searchAndBrowse;
 	BLayoutBuilder::Group<>(controlBar, B_HORIZONTAL, B_USE_SMALL_SPACING)
 		.SetInsets(B_USE_WINDOW_SPACING, B_USE_SMALL_SPACING,
 			B_USE_WINDOW_SPACING, B_USE_SMALL_SPACING)
@@ -355,18 +355,24 @@ MainWindow::_BuildLayout()
 		.AddGlue(1)
 		.Add(fDisplay, 6)
 		.AddGlue(1)
-		.AddGroup(B_VERTICAL, 2, 0)
-			.AddGlue()
-			.Add(fSearchField)
-			.Add(fSearchLabel = new BarLabel(NULL, "Search", 0.85f))
-			.AddGlue()
-		.End()
-		.AddGroup(B_VERTICAL, 2, 0)
-			.AddGlue()
-			.Add(fBrowseButton)
-			.Add(fBrowseLabel = new BarLabel(NULL, "Browse", 0.85f))
-			.AddGlue()
+		// the search field well clear of the Browse button, as in iTunes
+		.AddGroup(B_HORIZONTAL,
+				ceilf(be_control_look->DefaultItemSpacing() * 1.3f), 0)
+			.GetLayout(&searchAndBrowse)
+			.AddGroup(B_VERTICAL, 2, 0)
+				.AddGlue()
+				.Add(fSearchField)
+				.Add(new BarLabel(NULL, "Search", 0.85f))
+				.AddGlue()
+			.End()
+			.AddGroup(B_VERTICAL, 2, 0)
+				.AddGlue()
+				.Add(fBrowseButton)
+				.Add(new BarLabel(NULL, "Browse", 0.85f))
+				.AddGlue()
+			.End()
 		.End();
+	fSearchAndBrowse = searchAndBrowse;
 
 	// source list
 	fSourceList = new SourceListView("sources");
@@ -431,18 +437,25 @@ MainWindow::_BuildLayout()
 		new BMessage(kMsgShowEqualizer));
 	float buttons = fAddButton->MinSize().width * 3 + 2 * 3;
 		// the same on both sides keeps the totals centered
+	float inset = BControlLook::ComposeSpacing(B_USE_WINDOW_SPACING);
+	// the window's resize knob reaches into the corner: keep the width of a
+	// scroll bar clear, as document windows do
+	float rightInset = std::max(inset,
+		be_control_look->GetScrollBarWidth(B_VERTICAL)
+			+ BControlLook::ComposeSpacing(B_USE_SMALL_SPACING));
 
 	BarView* bottomBar = new BarView("bottom bar", B_HORIZONTAL, false);
 	fBottomBar = bottomBar;
 	BLayoutBuilder::Group<>(bottomBar, B_HORIZONTAL, 3)
-		.SetInsets(B_USE_WINDOW_SPACING, 4, B_USE_WINDOW_SPACING, 4)
+		.SetInsets(inset, 4, rightInset, 4)
 		.Add(fAddButton)
 		.Add(fShuffleButton)
 		.Add(fRepeatButton)
 		.AddGlue()
 		.Add(fStatusText)
 		.AddGlue()
-		.AddStrut(buttons - fEqualizerButton->MinSize().width - 3)
+		.AddStrut(buttons - fEqualizerButton->MinSize().width - 3
+			- (rightInset - inset))
 		.Add(fEqualizerButton);
 
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
@@ -1726,15 +1739,15 @@ MainWindow::_SetMiniPlayer(bool mini)
 		return;
 
 	// everything but the control bar, and in it the search and browse
-	// controls
-	BView* views[] = { fMenuBar, fMainSplit, fBottomBar, fSearchField,
-		fSearchLabel, fBrowseButton, fBrowseLabel };
+	// controls (their whole group, which would leave its spacing otherwise)
+	BView* views[] = { fMenuBar, fMainSplit, fBottomBar };
 	const size_t count = sizeof(views) / sizeof(views[0]);
 
 	if (mini) {
 		fFullFrame = Frame();
 		for (size_t i = 0; i < count; i++)
 			views[i]->Hide();
+		fSearchAndBrowse->SetVisible(false);
 		fMiniPlayer = true;
 		// no resize knob over the controls; the borders still resize it
 		SetLook(B_TITLED_WINDOW_LOOK);
@@ -1755,6 +1768,7 @@ MainWindow::_SetMiniPlayer(bool mini)
 		fMiniFrame = Frame();
 		for (size_t i = 0; i < count; i++)
 			views[i]->Show();
+		fSearchAndBrowse->SetVisible(true);
 		fMiniPlayer = false;
 		SetLook(B_DOCUMENT_WINDOW_LOOK);
 		SetFeel(B_NORMAL_WINDOW_FEEL);
