@@ -24,6 +24,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <algorithm>
@@ -121,6 +122,30 @@ public:
 };
 
 
+/*!	What \a key types with Shift as \a modifiers have it: with Command held,
+	Haiku's keymap gives the unshifted character whatever Shift does, so
+	Command + > arrives as Command + Shift + "." (on US keyboards).
+	0 for keys that type more than one byte.
+*/
+static char
+typed_character(uint32 key, uint32 modifiers)
+{
+	key_map* keys = NULL;
+	char* chars = NULL;
+	get_key_map(&keys, &chars);
+	char character = 0;
+	if (keys != NULL && chars != NULL && key < 128) {
+		int32 offset = (modifiers & B_SHIFT_KEY) != 0
+			? keys->shift_map[key] : keys->normal_map[key];
+		if (chars[offset] == 1)
+			character = chars[offset + 1];
+	}
+	free(keys);
+	free(chars);
+	return character;
+}
+
+
 // Command + > and Command + < fast forward and rewind: one step when
 // pressed, and on and on while held, until that key goes up.
 class ScanKeyFilter : public BMessageFilter {
@@ -138,20 +163,19 @@ public:
 			fWindow->StopKeyScan(message->GetInt32("key", 0));
 			return B_DISPATCH_MESSAGE;
 		}
-		const char* bytes;
-		if (message->what != B_KEY_DOWN
-			|| message->FindString("bytes", &bytes) != B_OK
-			|| (bytes[0] != '>' && bytes[0] != '<'))
+		if (message->what != B_KEY_DOWN)
 			return B_DISPATCH_MESSAGE;
 		uint32 modifiers = message->GetInt32("modifiers", 0);
 		if ((modifiers & B_COMMAND_KEY) == 0
 			|| (modifiers & (B_CONTROL_KEY | B_OPTION_KEY)) != 0)
 			return B_DISPATCH_MESSAGE;
+		int32 key = message->GetInt32("key", 0);
+		char character = typed_character(key, modifiers);
+		if (character != '>' && character != '<')
+			return B_DISPATCH_MESSAGE;
 		// the key's own repeats change nothing: the scan has its pace
-		if (message->GetInt32("be:key_repeat", 0) == 0) {
-			fWindow->StartKeyScan(bytes[0] == '>' ? 1 : -1,
-				message->GetInt32("key", 0));
-		}
+		if (message->GetInt32("be:key_repeat", 0) == 0)
+			fWindow->StartKeyScan(character == '>' ? 1 : -1, key);
 		return B_SKIP_MESSAGE;
 	}
 
