@@ -1,7 +1,9 @@
 /*
  * The music library: songs, playlists, play counts. Lives in the window
  * thread; only SongIdForPath() may be called from other threads (the
- * importer).
+ * importer). The songs and playlists of the connected shared libraries are
+ * here too, apart from the user's: they are never saved, never counted as
+ * played, and go when their share is disconnected.
  */
 #ifndef LIBRARY_H
 #define LIBRARY_H
@@ -39,6 +41,8 @@ struct Song {
 			int32				playCount;
 			time_t				lastPlayed;
 			time_t				dateAdded;
+			int32				share;
+				// the shared library the song is on, 0 for the user's own
 
 			// derived from the above, not stored
 			BString				titleKey;
@@ -60,7 +64,11 @@ enum source_kind {
 	SOURCE_RECENTLY_ADDED,
 	SOURCE_RECENTLY_PLAYED,
 	SOURCE_TOP_25,
-	SOURCE_PLAYLIST
+	SOURCE_PLAYLIST,
+	SOURCE_SHARE,
+		// a shared library: the playlist id is the share's
+	SOURCE_SHARE_PLAYLIST,
+	SOURCE_KIND_COUNT
 };
 
 
@@ -68,6 +76,7 @@ struct Playlist {
 			int32				id;
 			BString				name;
 			std::vector<int32>	songs;
+			int32				share = 0;
 };
 
 
@@ -81,6 +90,7 @@ public:
 			bool				IsDirty() const { return fDirty; }
 			void				SetDirty() { fDirty = true; }
 
+	// The user's own songs; SongById() finds shared ones too.
 			int32				CountSongs() const
 									{ return (int32)fSongs.size(); }
 			Song*				SongAt(int32 index) const;
@@ -104,6 +114,21 @@ public:
 			void				RemovePlaylist(int32 id);
 			BString				UniquePlaylistName(const char* base) const;
 
+	// Takes the songs (the vector's entries become NULL) and gives their
+	// ids, in the same order.
+			void				AddSharedSongs(int32 share,
+									std::vector<Song*>& songs,
+									std::vector<int32>& ids);
+			Playlist*			AddSharedPlaylist(int32 share,
+									const char* name,
+									const std::vector<int32>& songs);
+			void				GetSharedPlaylists(int32 share,
+									std::vector<const Playlist*>& playlists)
+									const;
+			Playlist*			SharedPlaylistById(int32 id) const;
+			int32				CountSharedSongs(int32 share) const;
+			void				RemoveShare(int32 share);
+
 	// The songs of a source, in the source's own order.
 			void				GetSongs(source_kind kind, int32 playlist,
 									std::vector<int32>& songs) const;
@@ -122,6 +147,11 @@ private:
 			std::vector<Playlist*> fPlaylists;
 			int32				fNextSongId;
 			int32				fNextPlaylistId;
+
+			std::map<int32, std::vector<Song*> > fSharedSongs;
+			std::vector<Playlist*> fSharedPlaylists;
+			int32				fNextSharedId;
+				// for shared songs and playlists, far from the saved ids
 			BString				fPath;
 			bool				fDirty;
 			BCollator			fCollator;

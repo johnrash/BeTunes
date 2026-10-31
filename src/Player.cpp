@@ -14,6 +14,7 @@
 
 #include "AudioOutput.h"
 #include "BeTunes.h"
+#include "DaapStream.h"
 
 
 static const float kRingSeconds = 1.0f;
@@ -29,6 +30,8 @@ Player::Player(const BMessenger& target)
 	fCommandLock("player commands"),
 	fWakeSem(-1),
 	fThread(-1),
+	fStreamLock("player stream"),
+	fStream(NULL),
 	fFile(NULL),
 	fTrack(NULL),
 	fOutput(NULL),
@@ -69,6 +72,7 @@ Player::~Player()
 	Command command;
 	command.type = kCommandQuit;
 	_PostCommand(command);
+	_CancelStream();
 	status_t result;
 	wait_for_thread(fThread, &result);
 	delete_sem(fWakeSem);
@@ -92,6 +96,8 @@ Player::Play(const char* path, int32 song)
 		fDuration = 0;
 	}
 
+	_CancelStream();
+		// the song before may be waiting for the network
 	Command command;
 	command.type = kCommandPlay;
 	command.path = path;
@@ -117,6 +123,7 @@ Player::Stop()
 		fDuration = 0;
 	}
 
+	_CancelStream();
 	Command command;
 	command.type = kCommandStop;
 	_PostCommand(command);
@@ -215,6 +222,15 @@ Player::_PostCommand(const Command& command)
 }
 
 
+void
+Player::_CancelStream()
+{
+	BAutolock _(fStreamLock);
+	if (fStream != NULL)
+		fStream->Cancel();
+}
+
+
 status_t
 Player::_ThreadEntry(void* cookie)
 {
@@ -298,18 +314,37 @@ Player::_Open(const Command& command)
 	fOpenSerial = command.serial;
 	fOpenSong = command.song;
 
-	entry_ref ref;
-	status_t status = get_ref_for_path(command.path, &ref);
-	BEntry entry(&ref);
-	if (status == B_OK && !entry.Exists())
-		status = B_ENTRY_NOT_FOUND;
-	if (status != B_OK) {
-		_Notify(kMsgPlayerError, command.serial, command.song,
-			strerror(status));
-		return;
+	status_t status;
+	if (DaapStream::IsStreamURL(command.path)) {
+		DaapStream* stream = new DaapStream(command.path);
+		{
+			BAutolock _(fStreamLock);
+			fStream = stream;
+		}
+		BString error;
+		status = stream->Open(error);
+		if (status != B_OK) {
+			_Close();
+			if (status != B_CANCELED) {
+				_Notify(kMsgPlayerError, command.serial, command.song,
+					error);
+			}
+			return;
+		}
+		fFile = new BMediaFile(stream);
+	} else {
+		entry_ref ref;
+		status = get_ref_for_path(command.path, &ref);
+		BEntry entry(&ref);
+		if (status == B_OK && !entry.Exists())
+			status = B_ENTRY_NOT_FOUND;
+		if (status != B_OK) {
+			_Notify(kMsgPlayerError, command.serial, command.song,
+				strerror(status));
+			return;
+		}
+		fFile = new BMediaFile(&ref);
 	}
-
-	fFile = new BMediaFile(&ref);
 	status = fFile->InitCheck();
 	media_format format;
 	if (status == B_OK) {
@@ -433,6 +468,15 @@ Player::_Close()
 		// also deletes the track
 	fFile = NULL;
 	fTrack = NULL;
+	if (fStream != NULL) {
+		// BMediaFile does not own its source
+		DaapStream* stream = fStream;
+		{
+			BAutolock _(fStreamLock);
+			fStream = NULL;
+		}
+		delete stream;
+	}
 	fDecoderDone = true;
 	fEndNotified = true;
 	fPendingFrames = 0;

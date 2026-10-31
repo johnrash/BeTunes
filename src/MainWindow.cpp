@@ -31,11 +31,15 @@
 
 #include "BrowserList.h"
 #include "Controls.h"
+#include "Daap.h"
+#include "DaapProtocol.h"
 #include "EqualizerWindow.h"
 #include "Importer.h"
 #include "Player.h"
+#include "PromptWindow.h"
 #include "SearchField.h"
 #include "Settings.h"
+#include "ShareFinder.h"
 #include "SongList.h"
 #include "SourceList.h"
 #include "InfoWindow.h"
@@ -58,6 +62,18 @@ static const bigtime_t kScanTickInterval = 150000;
 static const int32 kScanTicksBeforeHold = 3;
 	// fast forward and rewind while the button is held
 static const int32 kVolumeStep = 10;
+static const bigtime_t kKeepAliveInterval = 5 * 60000000LL;
+	// shared libraries end sessions unused for about 30 minutes
+static const int32 kMissedRoundsBeforeGone = 3;
+	// a share that did not answer this many rounds left the network
+static const bigtime_t kLogoutTimeout = 2000000;
+	// at most this long at quit
+
+enum {
+	kShareIdle = 0,
+	kShareConnecting,
+	kShareConnected
+};
 
 
 namespace {
@@ -288,6 +304,7 @@ MainWindow::MainWindow(const BMessage& settings)
 	fPlayItem(NULL),
 	fMiniPlayerItem(NULL),
 	fMiniOnTopItem(NULL),
+	fDisconnectItem(NULL),
 	fMenuBar(NULL),
 	fBottomBar(NULL),
 	fSearchAndBrowse(NULL),
@@ -315,6 +332,11 @@ MainWindow::MainWindow(const BMessage& settings)
 	fTickRunner(NULL),
 	fRefreshRunner(NULL),
 	fSaveRunner(NULL),
+	fNextShareId(1),
+	fNextShareSerial(1),
+	fShareFinder(NULL),
+	fKeepAliveRunner(NULL),
+	fSourceListStale(false),
 	fScanRunner(NULL),
 	fScanKey(0),
 	fScanDirection(0),
@@ -343,6 +365,8 @@ MainWindow::MainWindow(const BMessage& settings)
 		false);
 	fSortStates[SOURCE_TOP_25] = sort_state(COLUMN_PLAYS, false);
 	fSortStates[SOURCE_PLAYLIST] = sort_state(COLUMN_NUMBER, true);
+	fSortStates[SOURCE_SHARE] = sort_state(COLUMN_ARTIST, true);
+	fSortStates[SOURCE_SHARE_PLAYLIST] = sort_state(COLUMN_NUMBER, true);
 
 	_ApplySettings(settings);
 	_CreateEqualizerWindow();
@@ -353,6 +377,13 @@ MainWindow::MainWindow(const BMessage& settings)
 	fTickRunner = new BMessageRunner(BMessenger(this), &tick, kTickInterval);
 	BMessage save(kMsgSaveLibrary);
 	fSaveRunner = new BMessageRunner(BMessenger(this), &save, kSaveInterval);
+	BMessage keepAlive(kMsgShareKeepAlive);
+	fKeepAliveRunner = new BMessageRunner(BMessenger(this), &keepAlive,
+		kKeepAliveInterval);
+
+	fShareFinder = new ShareFinder(BMessenger(this));
+	if (fShareFinder->Start() != B_OK)
+		fprintf(stderr, "BeTunes: cannot look for shared libraries\n");
 }
 
 
@@ -362,6 +393,8 @@ MainWindow::~MainWindow()
 	delete fRefreshRunner;
 	delete fSaveRunner;
 	delete fScanRunner;
+	delete fKeepAliveRunner;
+	delete fShareFinder;
 
 	delete fPlayer;
 	fImporter->Cancel();
@@ -419,6 +452,7 @@ MainWindow::QuitRequested()
 	fImporter->Cancel();
 	_SaveSettings();
 	_SaveLibrary();
+	_LogoutShares();
 	return true;
 }
 
@@ -592,6 +626,12 @@ MainWindow::_BuildMenuBar()
 	menu->AddSeparatorItem();
 	menu->AddItem(new BMenuItem("Add to Library" B_UTF8_ELLIPSIS,
 		new BMessage(kMsgAddToLibrary), 'O'));
+	menu->AddItem(new BMenuItem("Connect to Shared Library" B_UTF8_ELLIPSIS,
+		new BMessage(kMsgConnectToShare), 'K'));
+	fDisconnectItem = new BMenuItem("Disconnect Shared Library",
+		new BMessage(kMsgDisconnectShare));
+	menu->AddItem(fDisconnectItem);
+	menu->AddSeparatorItem();
 	fShowInTrackerItem = new BMenuItem("Show in Tracker",
 		new BMessage(kMsgShowInTracker), 'R');
 	menu->AddItem(fShowInTrackerItem);
@@ -726,7 +766,7 @@ MainWindow::_ApplySettings(const BMessage& settings)
 	if (settings.FindMessage("columns", &columns) == B_OK)
 		fSongList->LoadState(&columns);
 	BMessage state;
-	for (int32 kind = SOURCE_LIBRARY; kind <= SOURCE_PLAYLIST; kind++) {
+	for (int32 kind = SOURCE_LIBRARY; kind < SOURCE_KIND_COUNT; kind++) {
 		if (settings.FindMessage("sort", kind, &state) == B_OK
 			&& state.HasInt32("sortID"))
 			fSortStates[kind] = state;
@@ -750,6 +790,30 @@ MainWindow::_ApplySettings(const BMessage& settings)
 			if (!user.name.IsEmpty())
 				fUserPresets.push_back(user);
 		}
+	}
+
+	BMessage added;
+	for (int32 i = 0; settings.FindMessage("shared library", i, &added)
+			== B_OK; i++) {
+		const char* host = added.GetString("host", NULL);
+		int32 port = added.GetInt32("port", 3689);
+		if (host == NULL || port <= 0 || port > 65535
+			|| _ShareByAddress(host, port) != NULL)
+			continue;
+		Share share;
+		share.id = fNextShareId++;
+		share.name = added.GetString("name", host);
+		share.host = host;
+		share.port = port;
+		share.added = true;
+		share.found = false;
+		share.missed = 0;
+		share.state = kShareIdle;
+		share.serial = 0;
+		share.session = 0;
+		share.revision = 0;
+		share.failures = 0;
+		fShares.push_back(share);
 	}
 
 	_SetBrowserVisible(settings.GetBool("browser", true));
@@ -784,13 +848,25 @@ MainWindow::_SaveSettings()
 
 	if (fSortKind >= 0)
 		fSongList->GetSortState(fSortStates[fSortKind]);
-	for (int32 kind = SOURCE_LIBRARY; kind <= SOURCE_PLAYLIST; kind++)
+	for (int32 kind = SOURCE_LIBRARY; kind < SOURCE_KIND_COUNT; kind++)
 		settings.AddMessage("sort", &fSortStates[kind]);
 	BMessage columns;
 	fSongList->SaveState(&columns);
 	settings.AddMessage("columns", &columns);
-	settings.AddInt32("source kind", fSourceKind);
-	settings.AddInt32("source playlist", fSourcePlaylist);
+	// a shared library may be gone next time
+	settings.AddInt32("source kind", _IsShareSource() ? SOURCE_LIBRARY
+		: fSourceKind);
+	settings.AddInt32("source playlist", _IsShareSource() ? -1
+		: fSourcePlaylist);
+	for (size_t i = 0; i < fShares.size(); i++) {
+		if (!fShares[i].added)
+			continue;
+		BMessage added;
+		added.AddString("name", fShares[i].name);
+		added.AddString("host", fShares[i].host);
+		added.AddInt32("port", fShares[i].port);
+		settings.AddMessage("shared library", &added);
+	}
 
 	BMessage equalizer;
 	archive_equalizer(fEqualizer, equalizer);
@@ -991,6 +1067,7 @@ MainWindow::MessageReceived(BMessage* message)
 		{
 			std::vector<int32> songs;
 			fSongList->GetSelectedSongs(songs);
+			_KeepLocalSongs(songs);
 			if (songs.empty())
 				break;
 			const char* name = message->GetString("name", NULL);
@@ -1005,6 +1082,8 @@ MainWindow::MessageReceived(BMessage* message)
 			_RenamePlaylist(message->GetInt32("playlist",
 				_IsUserPlaylist() ? fSourcePlaylist : -1),
 				message->GetString("name", ""));
+			if (fSourceListStale && !fSourceList->IsRenaming())
+				_RebuildSourceList();
 			break;
 		case kMsgDeletePlaylist:
 		{
@@ -1056,6 +1135,9 @@ MainWindow::MessageReceived(BMessage* message)
 					i++)
 				songs.push_back(song);
 			int32 playlist = message->GetInt32("playlist", -1);
+			_KeepLocalSongs(songs);
+			if (songs.empty())
+				break;
 			if (playlist == -2)
 				_NewPlaylist(NULL, songs, true);
 			else {
@@ -1079,6 +1161,81 @@ MainWindow::MessageReceived(BMessage* message)
 		case kMsgTagsWritten:
 			_TagsWritten(message);
 			break;
+
+		// shared libraries
+		case kMsgConnectToShare:
+		{
+			const char* address;
+			int32 id;
+			if (message->FindInt32("share", &id) == B_OK) {
+				Share* share = _ShareById(id);
+				if (share == NULL)
+					break;
+				_SelectSource(SOURCE_SHARE, id);
+				if (share->state == kShareIdle)
+					_ConnectShare(id);
+			} else if (message->FindString("address", &address) == B_OK)
+				_ConnectToAddress(address, message->GetString("password", NULL));
+			else
+				_AskShareAddress();
+			break;
+		}
+		case kMsgShareAddress:
+			if (!message->GetBool("canceled", false)) {
+				_ConnectToAddress(message->GetString("address", ""),
+					NULL);
+			}
+			break;
+		case kMsgSharePassword:
+		{
+			Share* share = _ShareById(message->GetInt32("share", -1));
+			if (share == NULL || share->state != kShareIdle)
+				break;
+			if (message->GetBool("canceled", false)) {
+				if (_SourceShare() == share->id)
+					_SelectSource(SOURCE_LIBRARY, -1);
+				break;
+			}
+			share->user = message->GetString("user", "");
+			share->password = message->GetString("password", "");
+			_ConnectShare(share->id);
+			break;
+		}
+		case kMsgDisconnectShare:
+			_DisconnectShare(message->GetInt32("share", _SourceShare()));
+			break;
+		case kMsgRemoveShare:
+			_ForgetShare(message->GetInt32("share", _SourceShare()));
+			break;
+		case kMsgRefreshShares:
+			fShareFinder->Refresh();
+			break;
+		case kMsgSharesFound:
+			_SharesFound(message);
+			break;
+		case kMsgShareConnected:
+			_ShareConnected(message);
+			break;
+		case kMsgShareKeepAlive:
+			_KeepSharesAlive();
+			break;
+		case kMsgShareTouched:
+		{
+			Share* share = _ShareById(message->GetInt32("share", -1));
+			if (share == NULL || share->state != kShareConnected
+				|| share->serial != message->GetInt32("serial", -1))
+				break;
+			int32 error = message->GetInt32("error", DAAP_OK);
+			if (error == DAAP_OK) {
+				share->failures = 0;
+				break;
+			}
+			// the network may be back next time; a refusal is final
+			if (error == DAAP_NETWORK && ++share->failures < 2)
+				break;
+			_DisconnectShare(share->id, message->GetString("text", ""));
+			break;
+		}
 
 		// view
 		case kMsgSelectAll:
@@ -1260,6 +1417,9 @@ MainWindow::MessageReceived(BMessage* message)
 		case kMsgGetSources:
 			_ReplySources(message);
 			break;
+		case kMsgGetShares:
+			_ReplyShares(message);
+			break;
 
 		default:
 			handled = false;
@@ -1279,18 +1439,29 @@ void
 MainWindow::MenusBeginning()
 {
 	bool hasSelection = fSongList->CurrentSelection() != NULL;
+	// the songs of a shared library can only be played
+	bool shared = _IsShareSource();
 	Player::State state = fPlayer->CurrentState();
+	const Song* playing = state != Player::STOPPED
+		? fLibrary.SongById(fPlayer->CurrentSong()) : NULL;
 	fPlayItem->SetLabel(state == Player::PLAYING ? "Pause" : "Play");
 	fDeleteItem->SetLabel(_IsUserPlaylist() ? "Remove from Playlist"
 		: "Delete from Library" B_UTF8_ELLIPSIS);
-	fDeleteItem->SetEnabled(hasSelection);
+	fDeleteItem->SetEnabled(hasSelection && !shared);
 	fRenameItem->SetEnabled(_IsUserPlaylist());
 	fDeletePlaylistItem->SetEnabled(_IsUserPlaylist());
-	fFromSelectionItem->SetEnabled(hasSelection);
-	fShowInTrackerItem->SetEnabled(hasSelection
-		|| state != Player::STOPPED);
+	fFromSelectionItem->SetEnabled(hasSelection && !shared);
+	fShowInTrackerItem->SetEnabled(hasSelection ? !shared
+		: playing != NULL && playing->share == 0);
 	fShowCurrentItem->SetEnabled(state != Player::STOPPED);
-	fGetInfoItem->SetEnabled(hasSelection);
+	fGetInfoItem->SetEnabled(hasSelection && !shared);
+	const Share* share = NULL;
+	for (size_t i = 0; i < fShares.size(); i++) {
+		if (fShares[i].id == _SourceShare())
+			share = &fShares[i];
+	}
+	fDisconnectItem->SetEnabled(share != NULL
+		&& share->state != kShareIdle);
 	fMiniPlayerItem->SetLabel(fMiniPlayer ? "Switch to Full Player"
 		: "Switch to Mini Player");
 	fBrowserItem->SetLabel(fBrowserVisible ? "Hide Browser" : "Show Browser");
@@ -1312,6 +1483,22 @@ MainWindow::_RebuildSourceList()
 	BList items;
 	items.AddItem(new SourceItem(SOURCE_LIBRARY, -1,
 		Library::SourceName(SOURCE_LIBRARY)));
+	// the shared libraries, as in iTunes, each with its playlists
+	for (size_t i = 0; i < fShares.size(); i++) {
+		const Share& share = fShares[i];
+		SourceItem* item = new SourceItem(SOURCE_SHARE, share.id, share.name);
+		item->SetConnected(share.state == kShareConnected);
+		item->SetBusy(share.state == kShareConnecting);
+		items.AddItem(item);
+		std::vector<const Playlist*> playlists;
+		fLibrary.GetSharedPlaylists(share.id, playlists);
+		for (size_t j = 0; j < playlists.size(); j++) {
+			item = new SourceItem(SOURCE_SHARE_PLAYLIST, playlists[j]->id,
+				playlists[j]->name);
+			item->SetIndented(true);
+			items.AddItem(item);
+		}
+	}
 	items.AddItem(new SourceItem(SOURCE_RECENTLY_ADDED, -1,
 		Library::SourceName(SOURCE_RECENTLY_ADDED)));
 	items.AddItem(new SourceItem(SOURCE_RECENTLY_PLAYED, -1,
@@ -1324,6 +1511,7 @@ MainWindow::_RebuildSourceList()
 			playlist->name));
 	}
 	fSourceList->AddList(&items);
+	fSourceListStale = false;
 	_UpdatePlayingSource();
 
 	int32 index = fSourceList->IndexOf(fSourceKind, fSourcePlaylist);
@@ -1368,13 +1556,21 @@ MainWindow::_SourceSelectionChanged()
 		fSongList->SetSortState(fSortStates[kind]);
 		fSortKind = kind;
 	}
-	fSongList->SetPlaylistMode(kind == SOURCE_PLAYLIST);
+	fSongList->SetPlaylistMode(kind == SOURCE_PLAYLIST
+		|| kind == SOURCE_SHARE_PLAYLIST);
+	fSongList->SetDragEnabled(kind != SOURCE_SHARE
+		&& kind != SOURCE_SHARE_PLAYLIST);
 
 	fSourceKind = kind;
 	fSourcePlaylist = playlist;
 	fArtistAll = true;
 	fAlbumAll = true;
 	_RefreshAll(false);
+
+	// selecting a shared library connects to it
+	Share* share = kind == SOURCE_SHARE ? _ShareById(playlist) : NULL;
+	if (share != NULL && share->state == kShareIdle)
+		_ConnectShare(share->id);
 }
 
 
@@ -1542,6 +1738,15 @@ MainWindow::_UpdateStatusText()
 	songs.reserve(fVisible.size());
 	for (size_t i = 0; i < fVisible.size(); i++)
 		songs.push_back(fSourceSongs[fVisible[i]]);
+	Share* share = fSourceKind == SOURCE_SHARE
+		? _ShareById(fSourcePlaylist) : NULL;
+	if (share != NULL && share->state == kShareConnecting) {
+		BString text;
+		text << "Connecting to \xe2\x80\x9c" << share->name
+			<< "\xe2\x80\x9d" B_UTF8_ELLIPSIS;
+		fStatusText->SetText(text);
+		return;
+	}
 	bigtime_t duration;
 	off_t size;
 	fLibrary.GetTotals(songs, duration, size);
@@ -1777,7 +1982,7 @@ MainWindow::_UpdatePlayingSource()
 	for (int32 i = 0; i < fSourceList->CountItems(); i++) {
 		SourceItem* item = fSourceList->SourceAt(i);
 		bool isPlaying = playing && item->Kind() == fPlayingKind
-			&& (fPlayingKind != SOURCE_PLAYLIST
+			&& (fPlayingKind < SOURCE_PLAYLIST
 				|| item->PlaylistId() == fPlayingPlaylist);
 		if (isPlaying != item->IsPlaying()) {
 			item->SetPlaying(isPlaying);
@@ -1841,8 +2046,13 @@ MainWindow::_ShowCurrentSong()
 		fAlbumAll = true;
 		_RefreshAll(true);
 	}
-	if (fSongList->IndexOfSong(song) < 0)
-		_SelectSource(SOURCE_LIBRARY, -1);
+	if (fSongList->IndexOfSong(song) < 0) {
+		const Song* playing = fLibrary.SongById(song);
+		if (playing != NULL && playing->share != 0)
+			_SelectSource(SOURCE_SHARE, playing->share);
+		else
+			_SelectSource(SOURCE_LIBRARY, -1);
+	}
 	fSongList->SelectSong(song);
 	fSongList->MakeFocus(true);
 }
@@ -2249,6 +2459,7 @@ MainWindow::_NewPlaylist(const char* name, const std::vector<int32>& songs,
 
 	Playlist* playlist = fLibrary.AddPlaylist(playlistName);
 	playlist->songs = songs;
+	_KeepLocalSongs(playlist->songs);
 	_RebuildSourceList();
 	_SelectSource(SOURCE_PLAYLIST, playlist->id);
 	if (rename) {
@@ -2265,9 +2476,11 @@ MainWindow::_AddToPlaylist(int32 id, const std::vector<int32>& songs,
 	bool refreshNow)
 {
 	Playlist* playlist = fLibrary.PlaylistById(id);
-	if (playlist == NULL || songs.empty())
+	std::vector<int32> local(songs);
+	_KeepLocalSongs(local);
+	if (playlist == NULL || local.empty())
 		return;
-	playlist->songs.insert(playlist->songs.end(), songs.begin(), songs.end());
+	playlist->songs.insert(playlist->songs.end(), local.begin(), local.end());
 	fLibrary.SetDirty();
 	if (fSourceKind != SOURCE_PLAYLIST || fSourcePlaylist != id)
 		return;
@@ -2349,7 +2562,7 @@ MainWindow::_DeleteSongs(bool confirmed)
 {
 	std::vector<int32> selected;
 	fSongList->GetSelectedSongs(selected);
-	if (selected.empty())
+	if (selected.empty() || _IsShareSource())
 		return;
 
 	if (_IsUserPlaylist()) {
@@ -2472,6 +2685,10 @@ MainWindow::_ShowInTracker(int32 id)
 	const Song* song = fLibrary.SongById(songs[0]);
 	if (song == NULL)
 		return;
+	if (song->share != 0) {
+		fDisplay->ShowMessage("The song is on a shared library");
+		return;
+	}
 	BEntry entry(song->path);
 	BEntry parent;
 	entry_ref parentRef;
@@ -2499,7 +2716,7 @@ MainWindow::_GetInfo()
 	std::set<int32> seen;
 	for (size_t i = 0; i < ids.size(); i++) {
 		const Song* song = fLibrary.SongById(ids[i]);
-		if (song != NULL && seen.insert(ids[i]).second)
+		if (song != NULL && song->share == 0 && seen.insert(ids[i]).second)
 			songs.push_back(song);
 	}
 	if (songs.empty())
@@ -2538,7 +2755,7 @@ MainWindow::_ApplyInfo(BMessage* message)
 	int32 id;
 	for (int32 i = 0; message->FindInt32("song", i, &id) == B_OK; i++) {
 		Song* song = fLibrary.SongById(id);
-		if (song == NULL)
+		if (song == NULL || song->share != 0)
 			continue;
 
 		for (int field = 0; field < TAG_FIELD_COUNT; field++) {
@@ -2682,6 +2899,13 @@ MainWindow::_ShowSongContextMenu(BPoint where)
 
 	BPopUpMenu* menu = new BPopUpMenu("songs", false, false);
 	menu->AddItem(new BMenuItem("Play", new BMessage(kMsgSongInvoked)));
+	if (_IsShareSource()) {
+		// a shared library's songs can only be played
+		menu->SetTargetForItems(this);
+		menu->SetAsyncAutoDestruct(true);
+		menu->Go(where, true, true, true);
+		return;
+	}
 	menu->AddItem(new BMenuItem("Get Info", new BMessage(kMsgGetInfo)));
 	menu->AddSeparatorItem();
 	menu->AddItem(_BuildAddToPlaylistMenu("Add to Playlist"));
@@ -2717,6 +2941,23 @@ MainWindow::_ShowSourceContextMenu(int32 index, BPoint where)
 		BMessage* remove = new BMessage(kMsgDeletePlaylist);
 		remove->AddInt32("playlist", item->PlaylistId());
 		menu->AddItem(new BMenuItem("Delete Playlist" B_UTF8_ELLIPSIS, remove));
+	} else if (item != NULL && item->Kind() == SOURCE_SHARE) {
+		const Share* share = _ShareById(item->PlaylistId());
+		menu->AddSeparatorItem();
+		BMessage* message = new BMessage(share != NULL
+			&& share->state != kShareIdle
+				? kMsgDisconnectShare : kMsgConnectToShare);
+		message->AddInt32("share", item->PlaylistId());
+		menu->AddItem(new BMenuItem(share != NULL && share->state != kShareIdle
+			? "Disconnect" : "Connect", message));
+		if (share != NULL && share->added) {
+			BMessage* forget = new BMessage(kMsgRemoveShare);
+			forget->AddInt32("share", share->id);
+			menu->AddItem(new BMenuItem("Remove from List", forget));
+		}
+		menu->AddSeparatorItem();
+		menu->AddItem(new BMenuItem("Connect to Shared Library"
+			B_UTF8_ELLIPSIS, new BMessage(kMsgConnectToShare)));
 	} else if (item == NULL || item->Kind() == SOURCE_LIBRARY) {
 		if (item != NULL)
 			menu->AddSeparatorItem();
@@ -2724,10 +2965,609 @@ MainWindow::_ShowSourceContextMenu(int32 index, BPoint where)
 			new BMessage(kMsgNewPlaylist)));
 		menu->AddItem(new BMenuItem("Add to Library" B_UTF8_ELLIPSIS,
 			new BMessage(kMsgAddToLibrary)));
+		menu->AddItem(new BMenuItem("Connect to Shared Library"
+			B_UTF8_ELLIPSIS, new BMessage(kMsgConnectToShare)));
 	}
 	menu->SetTargetForItems(this);
 	menu->SetAsyncAutoDestruct(true);
 	menu->Go(where, true, true, true);
+}
+
+
+// #pragma mark - shared libraries
+
+
+namespace {
+
+
+// What a thread needs to talk to a share; the thread deletes it.
+struct ShareJob {
+	BMessenger	target;
+	int32		share;
+	int32		serial;
+	BString		host;
+	uint16		port;
+	BString		user;
+	BString		password;
+	uint32		session;
+	uint32		revision;
+};
+
+
+status_t
+connect_share(void* data)
+{
+	ShareJob* job = static_cast<ShareJob*>(data);
+	DaapClient client(job->host, job->port);
+	client.SetPassword(job->user, job->password);
+	DaapLibrary* library = new DaapLibrary;
+	daap_error error = client.Connect(*library);
+
+	BMessage reply(kMsgShareConnected);
+	reply.AddInt32("share", job->share);
+	reply.AddInt32("serial", job->serial);
+	reply.AddInt32("error", error);
+	reply.AddString("text", client.ErrorText());
+	reply.AddString("host", job->host);
+	reply.AddInt32("port", job->port);
+	reply.AddString("name", library->server.name);
+	if (error == DAAP_OK) {
+		reply.AddPointer("library", library);
+		if (job->target.SendMessage(&reply) != B_OK) {
+			// the window is gone
+			client.Logout(library->session);
+			delete library;
+		}
+	} else {
+		job->target.SendMessage(&reply);
+		delete library;
+	}
+	delete job;
+	return B_OK;
+}
+
+
+status_t
+touch_share(void* data)
+{
+	ShareJob* job = static_cast<ShareJob*>(data);
+	DaapClient client(job->host, job->port);
+	client.SetPassword(job->user, job->password);
+	daap_error error = client.Touch(job->session, job->revision);
+
+	BMessage reply(kMsgShareTouched);
+	reply.AddInt32("share", job->share);
+	reply.AddInt32("serial", job->serial);
+	reply.AddInt32("error", error);
+	reply.AddString("text", client.ErrorText());
+	job->target.SendMessage(&reply);
+	delete job;
+	return B_OK;
+}
+
+
+status_t
+logout_share(void* data)
+{
+	ShareJob* job = static_cast<ShareJob*>(data);
+	DaapClient client(job->host, job->port);
+	client.SetPassword(job->user, job->password);
+	client.Logout(job->session);
+	delete job;
+	return B_OK;
+}
+
+
+thread_id
+start_job(thread_func function, const char* name, ShareJob* job)
+{
+	thread_id thread = spawn_thread(function, name, B_NORMAL_PRIORITY, job);
+	if (thread < 0 || resume_thread(thread) != B_OK) {
+		delete job;
+		return -1;
+	}
+	return thread;
+}
+
+
+void
+show_alert(const char* title, const char* text)
+{
+	BAlert* alert = new BAlert(title, text, "OK", NULL, NULL,
+		B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+	alert->Go(NULL);
+}
+
+
+}	// namespace
+
+
+MainWindow::Share*
+MainWindow::_ShareById(int32 id)
+{
+	for (size_t i = 0; i < fShares.size(); i++) {
+		if (fShares[i].id == id)
+			return &fShares[i];
+	}
+	return NULL;
+}
+
+
+MainWindow::Share*
+MainWindow::_ShareByAddress(const char* host, uint16 port)
+{
+	for (size_t i = 0; i < fShares.size(); i++) {
+		if (fShares[i].port == port && fShares[i].host.ICompare(host) == 0)
+			return &fShares[i];
+	}
+	return NULL;
+}
+
+
+BString
+MainWindow::_HostAndPort(const Share& share) const
+{
+	return daap_host_and_port(share.host, share.port);
+}
+
+
+bool
+MainWindow::_IsShareSource() const
+{
+	return fSourceKind == SOURCE_SHARE || fSourceKind == SOURCE_SHARE_PLAYLIST;
+}
+
+
+int32
+MainWindow::_SourceShare() const
+{
+	if (fSourceKind == SOURCE_SHARE)
+		return fSourcePlaylist;
+	if (fSourceKind == SOURCE_SHARE_PLAYLIST) {
+		const Playlist* playlist
+			= fLibrary.SharedPlaylistById(fSourcePlaylist);
+		return playlist != NULL ? playlist->share : -1;
+	}
+	return -1;
+}
+
+
+void
+MainWindow::_KeepLocalSongs(std::vector<int32>& songs) const
+{
+	std::vector<int32> local;
+	local.reserve(songs.size());
+	for (size_t i = 0; i < songs.size(); i++) {
+		const Song* song = fLibrary.SongById(songs[i]);
+		if (song == NULL || song->share == 0)
+			local.push_back(songs[i]);
+	}
+	songs.swap(local);
+}
+
+
+void
+MainWindow::_SharesFound(BMessage* message)
+{
+	std::set<int32> seen;
+	bool changed = false;
+	const char* name;
+	for (int32 i = 0; message->FindString("name", i, &name) == B_OK; i++) {
+		const char* host = message->GetString("host", i, "");
+		int32 port = message->GetInt32("port", i, 3689);
+		Share* share = _ShareByAddress(host, port);
+		if (share == NULL) {
+			Share found;
+			found.id = fNextShareId++;
+			found.name = name;
+			found.host = host;
+			found.port = port;
+			found.added = false;
+			found.found = true;
+			found.missed = 0;
+			found.state = kShareIdle;
+			found.serial = 0;
+			found.session = 0;
+			found.revision = 0;
+			found.failures = 0;
+			fShares.push_back(found);
+			seen.insert(found.id);
+			changed = true;
+			continue;
+		}
+		seen.insert(share->id);
+		share->missed = 0;
+		if (!share->found || share->name != name) {
+			share->found = true;
+			share->name = name;
+			changed = true;
+		}
+	}
+
+	for (size_t i = fShares.size(); i-- > 0;) {
+		Share& share = fShares[i];
+		if (seen.count(share.id) == 0 && share.found
+			&& ++share.missed >= kMissedRoundsBeforeGone) {
+			share.found = false;
+			changed = true;
+		}
+		// gone from the network, not added by hand and not in use
+		if (!share.found && !share.added && share.state == kShareIdle) {
+			fShares.erase(fShares.begin() + i);
+			changed = true;
+		}
+	}
+
+	if (changed || fSourceListStale)
+		_SharesChanged();
+}
+
+
+void
+MainWindow::_SharesChanged()
+{
+	std::stable_sort(fShares.begin(), fShares.end(),
+		[](const Share& a, const Share& b) {
+			return a.name.ICompare(b.name) < 0;
+		});
+	if (fSourceList->IsRenaming()) {
+		// the rename field would end up over another item
+		fSourceListStale = true;
+		return;
+	}
+	_RebuildSourceList();
+}
+
+
+void
+MainWindow::_UpdateShareItems()
+{
+	for (int32 i = 0; i < fSourceList->CountItems(); i++) {
+		SourceItem* item = fSourceList->SourceAt(i);
+		if (item->Kind() != SOURCE_SHARE)
+			continue;
+		const Share* share = _ShareById(item->PlaylistId());
+		if (share == NULL)
+			continue;
+		item->SetConnected(share->state == kShareConnected);
+		item->SetBusy(share->state == kShareConnecting);
+		fSourceList->InvalidateItem(i);
+	}
+	_UpdateStatusText();
+}
+
+
+void
+MainWindow::_ConnectShare(int32 id)
+{
+	Share* share = _ShareById(id);
+	if (share == NULL || share->state != kShareIdle)
+		return;
+
+	ShareJob* job = new ShareJob;
+	job->target = BMessenger(this);
+	job->share = id;
+	job->serial = fNextShareSerial++;
+	job->host = share->host;
+	job->port = share->port;
+	job->user = share->user;
+	job->password = share->password;
+	job->session = 0;
+	job->revision = 0;
+	share->serial = job->serial;
+	share->state = kShareConnecting;
+	if (start_job(&connect_share, "connect share", job) < 0) {
+		share->state = kShareIdle;
+		fDisplay->ShowMessage("Cannot connect: no more threads");
+	}
+	_UpdateShareItems();
+}
+
+
+void
+MainWindow::_ShareConnected(BMessage* message)
+{
+	int32 id = message->GetInt32("share", -1);
+	int32 serial = message->GetInt32("serial", -1);
+	daap_error error = (daap_error)message->GetInt32("error", DAAP_PROTOCOL);
+	DaapLibrary* library = NULL;
+	message->FindPointer("library", (void**)&library);
+
+	Share* share = _ShareById(id);
+	if (share == NULL || share->serial != serial
+		|| share->state != kShareConnecting) {
+		// disconnected while connecting: log out of what came anyway
+		if (library != NULL) {
+			ShareJob* job = new ShareJob;
+			job->share = id;
+			job->serial = serial;
+			job->host = message->GetString("host", "");
+			job->port = message->GetInt32("port", 3689);
+			job->session = library->session;
+			job->revision = 0;
+			if (share != NULL) {
+				job->user = share->user;
+				job->password = share->password;
+			}
+			start_job(&logout_share, "logout share", job);
+			delete library;
+		}
+		return;
+	}
+
+	if (error == DAAP_OK && library != NULL) {
+		share->state = kShareConnected;
+		share->session = library->session;
+		share->revision = library->revision;
+		share->failures = 0;
+		if (share->added && !share->found && !library->name.IsEmpty())
+			share->name = library->name;
+				// better than the address it was added by
+		DaapSessions::Set(_HostAndPort(*share), share->session,
+			daap_authorization(share->user, share->password));
+
+		std::vector<int32> ids;
+		fLibrary.AddSharedSongs(id, library->songs, ids);
+		for (size_t i = 0; i < library->playlists.size(); i++) {
+			const DaapPlaylist& playlist = library->playlists[i];
+			std::vector<int32> songs;
+			songs.reserve(playlist.songs.size());
+			for (size_t j = 0; j < playlist.songs.size(); j++) {
+				int32 index = playlist.songs[j];
+				if (index >= 0 && index < (int32)ids.size())
+					songs.push_back(ids[index]);
+			}
+			fLibrary.AddSharedPlaylist(id, playlist.name, songs);
+		}
+		delete library;
+
+		BString text;
+		text << "\xe2\x80\x9c" << share->name << "\xe2\x80\x9d: "
+			<< (int32)ids.size() << (ids.size() == 1 ? " song" : " songs");
+		_SharesChanged();
+			// sorts fShares: share points elsewhere now
+		if (_SourceShare() == id)
+			_RefreshAll(false);
+		fDisplay->ShowMessage(text);
+		return;
+	}
+
+	delete library;
+	share->state = kShareIdle;
+	// a share added by its address is called by the name it gave, if it
+	// got that far
+	const char* serverName = message->GetString("name", "");
+	if (share->added && !share->found && serverName[0] != '\0'
+		&& share->name == share->host) {
+		share->name = serverName;
+		_SharesChanged();
+			// sorts fShares
+		share = _ShareById(id);
+	}
+	_UpdateShareItems();
+	if (error == DAAP_NEEDS_PASSWORD || error == DAAP_WRONG_PASSWORD) {
+		_AskSharePassword(*share, error == DAAP_WRONG_PASSWORD);
+		return;
+	}
+
+	BString text;
+	text << "Could not connect to \xe2\x80\x9c" << share->name
+		<< "\xe2\x80\x9d.\n\n" << message->GetString("text", "");
+	if (_SourceShare() == id)
+		_SelectSource(SOURCE_LIBRARY, -1);
+	show_alert(APP_NAME ": Shared library", text);
+}
+
+
+void
+MainWindow::_DisconnectShare(int32 id, const char* lostText)
+{
+	Share* share = _ShareById(id);
+	if (share == NULL)
+		return;
+	bool shown = _SourceShare() == id;
+
+	if (share->state == kShareConnecting) {
+		// its answer is ignored when it comes (and logged out of)
+		share->state = kShareIdle;
+		share->serial = 0;
+		_UpdateShareItems();
+		if (shown)
+			_SelectSource(SOURCE_LIBRARY, -1);
+		return;
+	}
+	if (share->state != kShareConnected)
+		return;
+
+	const Song* playing = fPlayer->CurrentState() != Player::STOPPED
+		? fLibrary.SongById(fPlayer->CurrentSong()) : NULL;
+	if (playing != NULL && playing->share == id)
+		_Stop();
+	const Song* queued = fLibrary.SongById(fQueue.Current());
+	if (queued != NULL && queued->share == id)
+		fQueue.Clear();
+			// the queue is one source's songs
+
+	if (lostText == NULL) {
+		ShareJob* job = new ShareJob;
+		job->share = id;
+		job->serial = share->serial;
+		job->host = share->host;
+		job->port = share->port;
+		job->user = share->user;
+		job->password = share->password;
+		job->session = share->session;
+		job->revision = share->revision;
+		start_job(&logout_share, "logout share", job);
+	}
+	DaapSessions::Remove(_HostAndPort(*share));
+	fLibrary.RemoveShare(id);
+	share->state = kShareIdle;
+	share->session = 0;
+	BString name(share->name);
+	if (!share->found && !share->added)
+		fShares.erase(fShares.begin() + (share - &fShares[0]));
+
+	_RebuildSourceList();
+	if (shown)
+		_SelectSource(SOURCE_LIBRARY, -1);
+
+	if (lostText != NULL) {
+		BString text;
+		text << "The connection to \xe2\x80\x9c" << name
+			<< "\xe2\x80\x9d was lost.";
+		if (lostText[0] != '\0')
+			text << "\n\n" << lostText;
+		show_alert(APP_NAME ": Shared library", text);
+	}
+}
+
+
+void
+MainWindow::_ForgetShare(int32 id)
+{
+	Share* share = _ShareById(id);
+	if (share == NULL || !share->added)
+		return;
+	share->added = false;
+	if (share->state != kShareIdle)
+		_DisconnectShare(id);
+	share = _ShareById(id);
+	if (share != NULL && !share->found && share->state == kShareIdle)
+		fShares.erase(fShares.begin() + (share - &fShares[0]));
+	_SharesChanged();
+}
+
+
+void
+MainWindow::_AskShareAddress()
+{
+	std::vector<PromptWindow::Field> fields;
+	fields.push_back({ "address", "Address:", "", false });
+	PromptWindow* window = new PromptWindow(this,
+		"Connect to Shared Library",
+		"The name or IP address of a computer that shares its music "
+		"library, with \xe2\x80\x9c:port\xe2\x80\x9d when that is not 3689.",
+		fields, "Connect", BMessenger(this), BMessage(kMsgShareAddress));
+	window->Show();
+}
+
+
+void
+MainWindow::_ConnectToAddress(const char* address, const char* password)
+{
+	std::string host;
+	uint16_t port;
+	std::string path;
+	if (!parse_share_address(address, host, port, path)) {
+		BString text;
+		text << "\xe2\x80\x9c" << address << "\xe2\x80\x9d is not an address "
+			"of a computer.";
+		show_alert(APP_NAME ": Shared library", text);
+		return;
+	}
+
+	Share* share = _ShareByAddress(host.c_str(), port);
+	if (share == NULL) {
+		Share added;
+		added.id = fNextShareId++;
+		added.name = host.c_str();
+			// until it tells its own
+		added.host = host.c_str();
+		added.port = port;
+		added.found = false;
+		added.missed = 0;
+		added.state = kShareIdle;
+		added.serial = 0;
+		added.session = 0;
+		added.revision = 0;
+		added.failures = 0;
+		fShares.push_back(added);
+		share = &fShares.back();
+	}
+	share->added = true;
+		// remembered from now on
+	if (password != NULL)
+		share->password = password;
+	int32 id = share->id;
+	_SharesChanged();
+	if (fSourceListStale)
+		_RebuildSourceList();
+	_SelectSource(SOURCE_SHARE, id);
+		// connects it
+}
+
+
+void
+MainWindow::_AskSharePassword(const Share& share, bool wrong)
+{
+	BString text;
+	if (wrong)
+		text << "That password is not right. ";
+	text << "The shared library \xe2\x80\x9c" << share.name
+		<< "\xe2\x80\x9d needs a password.";
+	std::vector<PromptWindow::Field> fields;
+	fields.push_back({ "password", "Password:", "", true });
+	BMessage reply(kMsgSharePassword);
+	reply.AddInt32("share", share.id);
+	reply.AddString("user", share.user);
+	PromptWindow* window = new PromptWindow(this, "Shared Library Password",
+		text, fields, "OK", BMessenger(this), reply);
+	window->Show();
+}
+
+
+void
+MainWindow::_KeepSharesAlive()
+{
+	for (size_t i = 0; i < fShares.size(); i++) {
+		const Share& share = fShares[i];
+		if (share.state != kShareConnected)
+			continue;
+		ShareJob* job = new ShareJob;
+		job->target = BMessenger(this);
+		job->share = share.id;
+		job->serial = share.serial;
+		job->host = share.host;
+		job->port = share.port;
+		job->user = share.user;
+		job->password = share.password;
+		job->session = share.session;
+		job->revision = share.revision;
+		start_job(&touch_share, "touch share", job);
+	}
+}
+
+
+void
+MainWindow::_LogoutShares()
+{
+	// all at once, and not waiting long for a share that is gone
+	std::vector<thread_id> threads;
+	for (size_t i = 0; i < fShares.size(); i++) {
+		Share& share = fShares[i];
+		if (share.state != kShareConnected)
+			continue;
+		ShareJob* job = new ShareJob;
+		job->share = share.id;
+		job->serial = share.serial;
+		job->host = share.host;
+		job->port = share.port;
+		job->user = share.user;
+		job->password = share.password;
+		job->session = share.session;
+		job->revision = share.revision;
+		thread_id thread = start_job(&logout_share, "logout share", job);
+		if (thread >= 0)
+			threads.push_back(thread);
+		DaapSessions::Remove(_HostAndPort(share));
+		share.state = kShareIdle;
+	}
+	bigtime_t end = system_time() + kLogoutTimeout;
+	for (size_t i = 0; i < threads.size(); i++) {
+		status_t result;
+		wait_for_thread_etc(threads[i], B_ABSOLUTE_TIMEOUT, end, &result);
+	}
 }
 
 
@@ -2840,7 +3680,28 @@ MainWindow::_ReplySources(BMessage* message)
 		reply.AddInt32("kind", item->Kind());
 		reply.AddInt32("playlist", item->PlaylistId());
 		reply.AddBool("playing", item->IsPlaying());
+		reply.AddBool("connected", item->IsConnected());
 	}
 	reply.AddInt32("selection", fSourceList->CurrentSelection());
+	message->SendReply(&reply);
+}
+
+
+void
+MainWindow::_ReplyShares(BMessage* message)
+{
+	BMessage reply(B_REPLY);
+	for (size_t i = 0; i < fShares.size(); i++) {
+		const Share& share = fShares[i];
+		reply.AddInt32("id", share.id);
+		reply.AddString("name", share.name);
+		reply.AddString("host", share.host);
+		reply.AddInt32("port", share.port);
+		reply.AddString("state", share.state == kShareConnected ? "connected"
+			: share.state == kShareConnecting ? "connecting" : "idle");
+		reply.AddBool("added", share.added);
+		reply.AddBool("found", share.found);
+		reply.AddInt32("songs", fLibrary.CountSharedSongs(share.id));
+	}
 	message->SendReply(&reply);
 }

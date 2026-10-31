@@ -96,8 +96,20 @@ SourceItem::SourceItem(source_kind kind, int32 playlist, const char* name)
 	fKind(kind),
 	fPlaylist(playlist),
 	fName(name),
-	fPlaying(false)
+	fPlaying(false),
+	fConnected(false),
+	fBusy(false),
+	fIndented(false)
 {
+}
+
+
+BRect
+SourceItem::EjectFrame(BRect frame)
+{
+	float size = floorf(frame.Height() * 0.6f);
+	float top = frame.top + floorf((frame.Height() - size) / 2);
+	return BRect(frame.right - 4 - size, top, frame.right - 4, top + size);
 }
 
 
@@ -132,14 +144,19 @@ SourceItem::DrawItem(BView* owner, BRect frame, bool complete)
 	}
 
 	float size = icon_size(frame);
-	BRect icon(frame.left + 6, frame.top + 2, frame.left + 6 + size,
-		frame.top + 2 + size);
+	float indent = fIndented ? size + 2 : 0;
+	BRect icon(frame.left + 6 + indent, frame.top + 2,
+		frame.left + 6 + indent + size, frame.top + 2 + size);
 	switch (fKind) {
 		case SOURCE_LIBRARY:
 			draw_library_icon(owner, icon);
 			break;
 		case SOURCE_PLAYLIST:
+		case SOURCE_SHARE_PLAYLIST:
 			draw_playlist_icon(owner, icon);
+			break;
+		case SOURCE_SHARE:
+			draw_shared_library_icon(owner, icon);
 			break;
 		default:
 			draw_smart_playlist_icon(owner, icon);
@@ -147,6 +164,15 @@ SourceItem::DrawItem(BView* owner, BRect frame, bool complete)
 	}
 
 	float right = frame.right - 4;
+	if (fConnected) {
+		BRect eject = EjectFrame(frame);
+		draw_glyph(owner, eject, GLYPH_EJECT, text);
+		right = eject.left - 4;
+	} else if (fBusy) {
+		BRect busy = EjectFrame(frame);
+		draw_glyph(owner, busy, GLYPH_BUSY, text);
+		right = busy.left - 4;
+	}
 	if (fPlaying) {
 		float speaker = floorf(frame.Height() * 0.6f);
 		BRect rect(right - speaker, frame.top + (frame.Height() - speaker) / 2,
@@ -159,7 +185,7 @@ SourceItem::DrawItem(BView* owner, BRect frame, bool complete)
 	owner->GetFontHeight(&height);
 	float baseline = floorf(frame.top + (frame.Height() - (height.ascent
 		+ height.descent)) / 2 + height.ascent);
-	float left = text_left(frame);
+	float left = text_left(frame) + indent;
 	BString name(fName);
 	owner->TruncateString(&name, B_TRUNCATE_END, right - left);
 	owner->SetDrawingMode(B_OP_OVER);
@@ -203,7 +229,7 @@ SourceListView::IndexOf(source_kind kind, int32 playlist) const
 	for (int32 i = 0; i < CountItems(); i++) {
 		SourceItem* item = SourceAt(i);
 		if (item->Kind() == kind
-			&& (kind != SOURCE_PLAYLIST || item->PlaylistId() == playlist))
+			&& (kind < SOURCE_PLAYLIST || item->PlaylistId() == playlist))
 			return i;
 	}
 	return -1;
@@ -292,6 +318,16 @@ SourceListView::MouseDown(BPoint where)
 		menu.AddInt32("index", index);
 		menu.AddPoint("where", ConvertToScreen(where));
 		Window()->PostMessage(&menu);
+		return;
+	}
+
+	SourceItem* item = SourceAt(index);
+	if (item != NULL && item->IsConnected()
+		&& SourceItem::EjectFrame(ItemFrame(index)).InsetByCopy(-2, -2)
+			.Contains(where)) {
+		BMessage eject(kMsgDisconnectShare);
+		eject.AddInt32("share", item->PlaylistId());
+		Window()->PostMessage(&eject);
 		return;
 	}
 
@@ -388,7 +424,10 @@ SourceListView::_AcceptsDrop(const BMessage* message, int32 index) const
 	if (message->what == kMsgSongDrag) {
 		return item == NULL || item->Kind() == SOURCE_PLAYLIST;
 	}
-	return message->HasRef("refs");
+	// files go to the user's library, not to a shared one
+	return message->HasRef("refs") && (item == NULL
+		|| (item->Kind() != SOURCE_SHARE
+			&& item->Kind() != SOURCE_SHARE_PLAYLIST));
 }
 
 

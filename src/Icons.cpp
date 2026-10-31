@@ -515,6 +515,33 @@ draw_glyph(BView* view, BRect rect, glyph which, rgb_color color)
 				bottom));
 			break;
 		}
+
+		case GLYPH_EJECT:
+		{
+			// a triangle on a bar, both on whole pixels and centered
+			float middle = r.left + s / 2;
+			float half = roundf(s * 0.42f);
+			float barHeight = std::max(1.0f, roundf(s * 0.16f));
+			float bottom = roundf(r.top + s * 0.9f);
+			float barTop = bottom - barHeight + 1;
+			float gap = std::max(1.0f, roundf(s * 0.1f));
+			float base = barTop - gap - 0.5f;
+			float tip = snap(r.top + s * 0.1f);
+			triangle(view, BPoint(middle, tip), BPoint(middle + half, base),
+				BPoint(middle - half, base));
+			view->FillRect(BRect(roundf(middle - half), barTop,
+				roundf(middle + half) - 1, bottom));
+			break;
+		}
+
+		case GLYPH_BUSY:
+		{
+			// three dots, like an ellipsis
+			float radius = std::max(1.0f, s * 0.09f);
+			for (int i = 0; i < 3; i++)
+				circle(view, at(r, 0.2f + i * 0.3f, 0.55f), radius, true);
+			break;
+		}
 	}
 
 	view->PopState();
@@ -586,5 +613,22 @@ draw_smart_playlist_icon(BView* view, BRect rect)
 	view->FillShape(&gear);
 	view->SetHighColor(140, 80, 195);
 	view->FillEllipse(center, r.Width() * 0.1f, r.Width() * 0.1f);
+	view->PopState();
+}
+
+
+void
+draw_shared_library_icon(BView* view, BRect rect)
+{
+	view->PushState();
+	view->MovePenTo(kPixelCenter);
+	view->SetDrawingMode(B_OP_ALPHA);
+	view->SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+	BRect r = square(rect);
+	// the library's note on a tile of its own color
+	rounded_tile(view, r, make_color(110, 215, 200, 255),
+		make_color(20, 135, 140, 255));
+	draw_note(view, r.InsetByCopy(r.Width() * 0.12f, r.Width() * 0.12f),
+		make_color(255, 255, 255, 255));
 	view->PopState();
 }

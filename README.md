@@ -55,6 +55,34 @@ a mini player, and the brushed toolbar with its status "LCD".
   for the same commands.
 - A speaker shows which source is playing.
 
+**Shared libraries**
+
+- The music libraries shared on the local network appear below **Library**,
+  as in iTunes: libraries shared over DAAP, by iTunes 4 to 6 or by DAAP
+  servers. BeTunes finds them through
+  multicast DNS, asking the network every half minute; a library that is
+  gone for three rounds leaves the list.
+- **File > Connect to Shared Library…** (Command + K) adds one by the
+  computer's name or IP address (with `:port` if it is not 3689), for
+  libraries on another network or when multicast does not get through.
+  Added libraries are remembered; right-click one for **Remove from List**.
+- Select a shared library to connect to it. Its songs show as the library's
+  do, with the artist and album browser and search, and its playlists below
+  it. A library that needs a password asks for it (and again when it is
+  wrong); the password is kept until BeTunes quits.
+- The songs play while they download: a song starts in a second or two, and
+  seeking ahead fetches that part of the file on its own.
+- Shared songs can only be played: they cannot be added to your playlists,
+  edited with Get Info, deleted or shown in Tracker, and they count no
+  plays.
+- The eject button next to a connected library (or **File > Disconnect
+  Shared Library**, or right-click **Disconnect**) disconnects from it.
+  BeTunes logs out of every shared library when it quits.
+- Libraries shared by **iTunes 7 and later** cannot be played: those
+  versions let only Apple's own players connect (they check every request
+  with a scheme that was never published). BeTunes says so when you select
+  one.
+
 **Browser (top right)**
 
 - **Artist** and **Album** lists of the current source, each starting with
@@ -197,6 +225,7 @@ a mini player, and the brushed toolbar with its status "LCD".
 | Shift + Command + M, the zoom button | mini player / full player |
 | Command + N, Shift + Command + N | new playlist, from the selection |
 | Command + O | add to library |
+| Command + K | connect to a shared library by its address |
 | Command + R | show in Tracker |
 | Command + I | Get Info |
 | Command + A, Shift + Command + A | select all / none |
@@ -244,7 +273,8 @@ into a PNG for checking.
 Unit tests for the parts that do not need Haiku (search folding, ID3v1,
 tag text, the play queue, the equalizer's filters and presets, the ID3 tag
 writer with every tag version, unsynchronisation, damaged tags, the copy
-and in-place paths), on any system:
+and in-place paths, and DAAP: DMAP replies, the request validation, the
+multicast DNS questions and answers, addresses), on any system:
 
     bash tests/run-unit-tests.sh
 
@@ -280,6 +310,14 @@ ID3v2.4, ID3v1 only), Ogg Vorbis, Opus, FLAC, AAC and WAV.
 explains itself when the audio output cannot be opened.
 `tests/readme-shots.sh` takes the screenshots above.
 
+`tests/daap-test-server.py` shares a folder of music as a DAAP library
+(Python 3, nothing else), with a password if asked and slowly if asked
+(`--rate`, to see seeking fetch a part of a song on its own), and answers
+BeTunes' multicast DNS questions, for trying shared libraries without
+iTunes:
+
+    python3 tests/daap-test-server.py --address 10.0.0.1 --dir ~/music --password secret
+
 ## Scripting
 
 Every command can be sent with `hey`; BeTunes replies when it is done.
@@ -311,7 +349,9 @@ Examples:
 | `Beqw` | show/hide the equalizer | `show` bool (none: toggle) |
 | `Beqc` | change the equalizer | `preset` name, `enabled` bool, `preamp` float, `gains` floats, or `band` int32 + `gain` float |
 | `Beqm` `Beqd` | make / delete a preset | `name` |
-| `Bsta` `Bgsl` `Bgbr` `Bgsr` | state, visible songs, browser lists, sources | (replies) |
+| `Bcsh` | connect to a shared library | `share` id (from `Bgsh`), or `address` and `password` strings (none: asks for the address) |
+| `Bdsh` `Brsh` `Bfsh` | disconnect a shared library, remove an added one from the list, look on the network again | `share` id (none: the one shown) |
+| `Bsta` `Bgsl` `Bgbr` `Bgsr` `Bgsh` | state, visible songs, browser lists, sources, shared libraries | (replies) |
 
 Column numbers for `Bsby`: 1 #, 2 Name, 3 Time, 4 Artist, 5 Album, 6 Genre,
 7 Track #, 8 Year, 9 Play Count, 10 Last Played, 11 Date Added, 12 Kind,
@@ -343,6 +383,11 @@ Column numbers for `Bsby`: 1 #, 2 Name, 3 Time, 4 Artist, 5 Album, 6 Genre,
 | `src/Controls.cpp` | Toolbar look, transport buttons, volume slider, icon buttons, headers |
 | `src/Icons.cpp` | Vector glyphs and source icons |
 | `src/Settings.cpp` | Settings files |
+| `src/DaapProtocol.cpp` | DAAP without network: DMAP, request validation, multicast DNS packets, HTTP and address helpers (no Haiku API) |
+| `src/Daap.cpp` | DAAP over the network: HTTP over sockets, the sessions, logging in and reading a shared library |
+| `src/DaapStream.cpp` | A shared song as a BPositionIO for BMediaFile, read while it downloads |
+| `src/ShareFinder.cpp` | Finds shared libraries on the network with multicast DNS |
+| `src/PromptWindow.cpp` | The dialogs asking for a shared library's address and password |
 
 ## License
 

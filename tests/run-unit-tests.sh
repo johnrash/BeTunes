@@ -10,6 +10,6 @@ if [ "$(uname)" != "Haiku" ]; then
 	FLAGS="$FLAGS -fsanitize=address,undefined"
 fi
 g++ $FLAGS -Isrc tests/unit-tests.cpp src/TextUtils.cpp src/PlayQueue.cpp \
-	src/Equalizer.cpp src/Id3Tag.cpp \
+	src/Equalizer.cpp src/Id3Tag.cpp src/DaapProtocol.cpp \
 	-o "$OUT"
 "$OUT"

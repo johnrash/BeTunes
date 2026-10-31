@@ -105,6 +105,9 @@ public:
 
 	// Shows the "#" column (playlists).
 			void				SetPlaylistMode(bool playlist);
+	// Songs of a shared library cannot go anywhere: no dragging.
+			void				SetDragEnabled(bool enabled)
+									{ fDragEnabled = enabled; }
 	// True when sorted by "#" only, ascending: the playlist order.
 			bool				IsInPlaylistOrder();
 			void				GetSortState(BMessage& state);
@@ -122,6 +125,7 @@ private:
 			std::set<int32>		fFailed;
 			BColumn*			fColumns[COLUMN_COUNT];
 			bool				fFilterAdded;
+			bool				fDragEnabled;
 };
 
 

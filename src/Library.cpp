@@ -19,6 +19,7 @@
 static const int32 kLibraryVersion = 1;
 static const time_t kRecentPeriod = 14 * 24 * 60 * 60;
 	// "Recently Added" and "Recently Played": two weeks, like iTunes
+static const int32 kFirstSharedId = 0x40000000;
 
 
 Song::Song()
@@ -32,7 +33,8 @@ Song::Song()
 	bitRate(0),
 	playCount(0),
 	lastPlayed(0),
-	dateAdded(0)
+	dateAdded(0),
+	share(0)
 {
 }
 
@@ -42,6 +44,7 @@ Library::Library()
 	fPathLock("library paths"),
 	fNextSongId(1),
 	fNextPlaylistId(1),
+	fNextSharedId(kFirstSharedId),
 	fDirty(false)
 {
 	BLocale::Default()->GetCollator(&fCollator);
@@ -56,6 +59,10 @@ Library::~Library()
 		delete fSongs[i];
 	for (size_t i = 0; i < fPlaylists.size(); i++)
 		delete fPlaylists[i];
+	while (!fSharedSongs.empty())
+		RemoveShare(fSharedSongs.begin()->first);
+	for (size_t i = 0; i < fSharedPlaylists.size(); i++)
+		delete fSharedPlaylists[i];
 }
 
 
@@ -299,6 +306,9 @@ Library::UpdateKeys(Song* song)
 void
 Library::SongPlayed(Song* song)
 {
+	if (song->share != 0)
+		return;
+			// the share counts its own plays, if anything
 	song->playCount++;
 	song->lastPlayed = time(NULL);
 	fDirty = true;
@@ -442,6 +452,29 @@ Library::GetSongs(source_kind kind, int32 playlistId,
 				songs = playlist->songs;
 			break;
 		}
+
+		case SOURCE_SHARE:
+		{
+			std::map<int32, std::vector<Song*> >::const_iterator found
+				= fSharedSongs.find(playlistId);
+			if (found == fSharedSongs.end())
+				break;
+			songs.reserve(found->second.size());
+			for (size_t i = 0; i < found->second.size(); i++)
+				songs.push_back(found->second[i]->id);
+			break;
+		}
+
+		case SOURCE_SHARE_PLAYLIST:
+		{
+			const Playlist* playlist = SharedPlaylistById(playlistId);
+			if (playlist != NULL)
+				songs = playlist->songs;
+			break;
+		}
+
+		case SOURCE_KIND_COUNT:
+			break;
 	}
 }
 
@@ -459,9 +492,105 @@ Library::SourceName(source_kind kind)
 		case SOURCE_TOP_25:
 			return "Top 25 Most Played";
 		case SOURCE_PLAYLIST:
+		case SOURCE_SHARE:
+		case SOURCE_SHARE_PLAYLIST:
+		case SOURCE_KIND_COUNT:
 			break;
 	}
 	return "";
+}
+
+
+// #pragma mark - shared libraries
+
+
+void
+Library::AddSharedSongs(int32 share, std::vector<Song*>& songs,
+	std::vector<int32>& ids)
+{
+	std::vector<Song*>& shared = fSharedSongs[share];
+	ids.clear();
+	ids.reserve(songs.size());
+	for (size_t i = 0; i < songs.size(); i++) {
+		Song* song = songs[i];
+		songs[i] = NULL;
+		song->id = fNextSharedId++;
+		song->share = share;
+		UpdateKeys(song);
+		shared.push_back(song);
+		fById[song->id] = song;
+		ids.push_back(song->id);
+	}
+}
+
+
+Playlist*
+Library::AddSharedPlaylist(int32 share, const char* name,
+	const std::vector<int32>& songs)
+{
+	Playlist* playlist = new Playlist;
+	playlist->id = fNextSharedId++;
+	playlist->name = name;
+	playlist->songs = songs;
+	playlist->share = share;
+	fSharedPlaylists.push_back(playlist);
+	return playlist;
+}
+
+
+void
+Library::GetSharedPlaylists(int32 share,
+	std::vector<const Playlist*>& playlists) const
+{
+	playlists.clear();
+	for (size_t i = 0; i < fSharedPlaylists.size(); i++) {
+		if (fSharedPlaylists[i]->share == share)
+			playlists.push_back(fSharedPlaylists[i]);
+	}
+}
+
+
+Playlist*
+Library::SharedPlaylistById(int32 id) const
+{
+	for (size_t i = 0; i < fSharedPlaylists.size(); i++) {
+		if (fSharedPlaylists[i]->id == id)
+			return fSharedPlaylists[i];
+	}
+	return NULL;
+}
+
+
+int32
+Library::CountSharedSongs(int32 share) const
+{
+	std::map<int32, std::vector<Song*> >::const_iterator found
+		= fSharedSongs.find(share);
+	return found != fSharedSongs.end() ? (int32)found->second.size() : 0;
+}
+
+
+void
+Library::RemoveShare(int32 share)
+{
+	std::map<int32, std::vector<Song*> >::iterator found
+		= fSharedSongs.find(share);
+	if (found != fSharedSongs.end()) {
+		for (size_t i = 0; i < found->second.size(); i++) {
+			fById.erase(found->second[i]->id);
+			delete found->second[i];
+		}
+		fSharedSongs.erase(found);
+	}
+
+	std::vector<Playlist*> kept;
+	for (size_t i = 0; i < fSharedPlaylists.size(); i++) {
+		if (fSharedPlaylists[i]->share == share)
+			delete fSharedPlaylists[i];
+		else
+			kept.push_back(fSharedPlaylists[i]);
+	}
+	fSharedPlaylists.swap(kept);
 }
 
 

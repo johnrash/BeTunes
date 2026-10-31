@@ -1,7 +1,9 @@
 /*
- * The source list on the left: the library, the smart playlists and the
- * user's playlists. Songs and files can be dropped on playlists (or below
- * the last one for a new playlist); playlists are renamed in place.
+ * The source list on the left: the library, the shared libraries on the
+ * network (with their playlists below them once connected, and an eject
+ * button that disconnects), the smart playlists and the user's playlists.
+ * Songs and files can be dropped on playlists (or below the last one for a
+ * new playlist); playlists are renamed in place.
  */
 #ifndef SOURCE_LIST_H
 #define SOURCE_LIST_H
@@ -29,6 +31,17 @@ public:
 			bool				IsPlaying() const { return fPlaying; }
 			void				SetPlaying(bool playing)
 									{ fPlaying = playing; }
+	// a shared library: connected (the eject button), or connecting
+			bool				IsConnected() const { return fConnected; }
+			void				SetConnected(bool connected)
+									{ fConnected = connected; }
+			bool				IsBusy() const { return fBusy; }
+			void				SetBusy(bool busy) { fBusy = busy; }
+	// a shared library's playlist, below it
+			void				SetIndented(bool indented)
+									{ fIndented = indented; }
+	// Where the eject button is in the item's frame.
+	static	BRect				EjectFrame(BRect frame);
 
 	virtual	void				DrawItem(BView* owner, BRect frame,
 									bool complete = false);
@@ -39,6 +52,9 @@ private:
 			int32				fPlaylist;
 			BString				fName;
 			bool				fPlaying;
+			bool				fConnected;
+			bool				fBusy;
+			bool				fIndented;
 };
 
 

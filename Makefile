@@ -10,6 +10,9 @@ SRCS = \
 	src/AudioOutput.cpp \
 	src/BrowserList.cpp \
 	src/Controls.cpp \
+	src/Daap.cpp \
+	src/DaapProtocol.cpp \
+	src/DaapStream.cpp \
 	src/Equalizer.cpp \
 	src/EqualizerWindow.cpp \
 	src/Icons.cpp \
@@ -20,8 +23,10 @@ SRCS = \
 	src/MainWindow.cpp \
 	src/Player.cpp \
 	src/PlayQueue.cpp \
+	src/PromptWindow.cpp \
 	src/SearchField.cpp \
 	src/Settings.cpp \
+	src/ShareFinder.cpp \
 	src/SongList.cpp \
 	src/SourceList.cpp \
 	src/StatusDisplay.cpp \
@@ -33,7 +38,8 @@ RDEFS = BeTunes.rdef
 
 # tracker: BFilePanel. columnlistview: BColumnListView, a static library
 # with its headers in the private tree, like BAboutWindow (in libbe).
-LIBS = be media tracker columnlistview $(STDCPPLIBS)
+# network: sockets, for shared libraries.
+LIBS = be media network tracker columnlistview $(STDCPPLIBS)
 
 LOCAL_INCLUDE_PATHS = src
 SYSTEM_INCLUDE_PATHS = /boot/system/develop/headers/private/interface

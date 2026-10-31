@@ -5,6 +5,9 @@
  * window never waits. The player tells its target when a song started,
  * ended or failed; every notification carries the serial number returned
  * by Play(), so late notifications about an earlier song can be ignored.
+ * Songs on shared libraries (daap:// paths) are read from a DaapStream
+ * while they download; a new song or Stop() cancels a read that waits for
+ * the network, so the decoder thread never hangs on a slow share.
  */
 #ifndef PLAYER_H
 #define PLAYER_H
@@ -21,6 +24,7 @@
 
 class AudioOutput;
 class BMediaFile;
+class DaapStream;
 class BMediaTrack;
 
 
@@ -70,6 +74,7 @@ private:
 			};
 
 			void				_PostCommand(const Command& command);
+			void				_CancelStream();
 	static	status_t			_ThreadEntry(void* cookie);
 			void				_Run();
 			void				_Open(const Command& command);
@@ -97,6 +102,11 @@ private:
 			std::deque<Command>	fCommands;
 			sem_id				fWakeSem;
 			thread_id			fThread;
+
+			// the stream of a shared song: set by the decoder thread, canceled
+			// from the window's
+			BLocker				fStreamLock;
+			DaapStream*			fStream;
 
 			// decoder thread only
 			BMediaFile*			fFile;

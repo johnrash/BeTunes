@@ -3,6 +3,12 @@
  * status display, search, browse), the source list on the left, the
  * artist and album browser at the top right, the song list below it and
  * new playlist, shuffle, repeat and the totals at the bottom.
+ *
+ * Shared libraries: the share finder reports what the network shares, the
+ * user can add one by its address, and selecting one connects to it in a
+ * thread of its own (asking for a password if it needs one). Its songs and
+ * playlists then live in the library until it is disconnected, which the
+ * eject button in the source list does.
  */
 #ifndef MAIN_WINDOW_H
 #define MAIN_WINDOW_H
@@ -36,6 +42,7 @@ class Importer;
 class TagWriter;
 class Player;
 class SearchField;
+class ShareFinder;
 class SongListView;
 class SourceListView;
 class StatusDisplay;
@@ -152,11 +159,62 @@ private:
 									BPoint where);
 			BMenu*				_BuildAddToPlaylistMenu(const char* label);
 
+			// shared libraries
+			struct Share {
+				int32			id;
+				BString			name;
+				BString			host;
+				uint16			port;
+				bool			added;
+					// by its address: remembered, listed when not found
+				bool			found;
+					// lately on the network
+				int32			missed;
+					// rounds of the share finder without it
+				int32			state;
+				int32			serial;
+					// of the last connection attempt
+				BString			user;
+				BString			password;
+					// for this session of BeTunes only
+				uint32			session;
+				uint32			revision;
+				int32			failures;
+					// keep-alives that could not reach it, in a row
+			};
+
+			Share*				_ShareById(int32 id);
+			Share*				_ShareByAddress(const char* host,
+									uint16 port);
+			BString				_HostAndPort(const Share& share) const;
+			bool				_IsShareSource() const;
+	// The share of the source shown, -1 for none.
+			int32				_SourceShare() const;
+			void				_SharesFound(BMessage* message);
+			void				_SharesChanged();
+			void				_UpdateShareItems();
+			void				_ConnectShare(int32 id);
+			void				_ShareConnected(BMessage* message);
+			void				_DisconnectShare(int32 id,
+									const char* lostText = NULL);
+			void				_ForgetShare(int32 id);
+			void				_AskShareAddress();
+			void				_ConnectToAddress(const char* address,
+									const char* password);
+			void				_AskSharePassword(const Share& share,
+									bool wrong);
+			void				_KeepSharesAlive();
+			void				_LogoutShares();
+	// Without the songs of shared libraries.
+			void				_KeepLocalSongs(std::vector<int32>& songs)
+									const;
+
 			// scripting
 			void				_ReplyState(BMessage* message);
 			void				_ReplySongs(BMessage* message);
 			void				_ReplyBrowser(BMessage* message);
 			void				_ReplySources(BMessage* message);
+			void				_ReplyShares(BMessage* message);
 
 			Library				fLibrary;
 			Player*				fPlayer;
@@ -200,6 +258,7 @@ private:
 			BMenuItem*			fGetInfoItem;
 			BMenuItem*			fMiniPlayerItem;
 			BMenuItem*			fMiniOnTopItem;
+			BMenuItem*			fDisconnectItem;
 
 			// the mini player: only the control bar
 			BMenuBar*			fMenuBar;
@@ -250,6 +309,15 @@ private:
 			BMessageRunner*		fTickRunner;
 			BMessageRunner*		fRefreshRunner;
 			BMessageRunner*		fSaveRunner;
+
+			// shared libraries
+			std::vector<Share>	fShares;
+			int32				fNextShareId;
+			int32				fNextShareSerial;
+			ShareFinder*		fShareFinder;
+			BMessageRunner*		fKeepAliveRunner;
+			bool				fSourceListStale;
+				// rebuild it once the playlist rename ends
 
 			// a scan held on the keyboard
 			BMessageRunner*		fScanRunner;

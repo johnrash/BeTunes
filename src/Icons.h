@@ -28,7 +28,9 @@ enum glyph {
 	GLYPH_EYE,
 	GLYPH_CLEAR,
 	GLYPH_WARNING,
-	GLYPH_EQUALIZER
+	GLYPH_EQUALIZER,
+	GLYPH_EJECT,
+	GLYPH_BUSY
 };
 
 
@@ -38,6 +40,7 @@ void draw_glyph(BView* view, BRect rect, glyph which, rgb_color color);
 void draw_library_icon(BView* view, BRect rect);
 void draw_playlist_icon(BView* view, BRect rect);
 void draw_smart_playlist_icon(BView* view, BRect rect);
+void draw_shared_library_icon(BView* view, BRect rect);
 
 // Mixes two colors; amount 0 gives a, 255 gives b.
 rgb_color mix(rgb_color a, rgb_color b, uint8 amount);

@@ -54,6 +54,15 @@ enum {
 	kMsgSelectAll			= 'Bsla',
 	kMsgSelectNone			= 'Bsln',
 
+	// Shared libraries (DAAP)
+	kMsgConnectToShare		= 'Bcsh',	// "share" int32, or "address" string
+		// and "password" string (none: asks for the address)
+	kMsgDisconnectShare		= 'Bdsh',	// "share" int32 (none: the shown one)
+	kMsgRemoveShare			= 'Brsh',	// "share" int32: forget an address
+	kMsgRefreshShares		= 'Bfsh',	// look on the network again
+	kMsgShareAddress		= 'Basa',	// from the address dialog
+	kMsgSharePassword		= 'Bpsw',	// from the password dialog: "share"
+
 	// View
 	kMsgToggleBrowser		= 'Bbrw',
 	kMsgMiniPlayer			= 'Bmin',	// "mini" bool (none: switch)
@@ -93,6 +102,13 @@ enum {
 	kMsgPlayerEnded			= 'Pend',
 	kMsgPlayerError			= 'Perr',	// "error" string, "output" bool
 
+	// Shared library notifications
+	kMsgSharesFound			= 'Dfnd',	// from the share finder
+	kMsgShareConnected		= 'Dcon',	// "share", "serial", "error", "text",
+		// "library" pointer
+	kMsgShareKeepAlive		= 'Dkal',
+	kMsgShareTouched		= 'Dtch',	// "share", "serial", "error", "text"
+
 	// Importer notifications
 	kMsgImportSongs			= 'Isng',	// "song" messages, "existing" paths
 	kMsgImportProgress		= 'Iprg',	// "name" string, "count" int32
@@ -102,7 +118,8 @@ enum {
 	kMsgGetState			= 'Bsta',
 	kMsgGetSongs			= 'Bgsl',	// visible songs in display order
 	kMsgGetBrowser			= 'Bgbr',	// artist and album list contents
-	kMsgGetSources			= 'Bgsr'	// source list contents
+	kMsgGetSources			= 'Bgsr',	// source list contents
+	kMsgGetShares			= 'Bgsh'	// shared libraries and their state
 };
 
 

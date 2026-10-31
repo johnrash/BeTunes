@@ -1,9 +1,11 @@
 /*
  * Unit tests for the parts of BeTunes that do not need the Haiku API
- * (text helpers, ID3v1 parsing, the play queue, the equalizer). Run them
+ * (text helpers, ID3v1 parsing, the play queue, the equalizer, the DAAP
+ * protocol). Run them
  * anywhere:
  *   bash tests/run-unit-tests.sh
  */
+#include "DaapProtocol.h"
 #include "Equalizer.h"
 #include "Id3Tag.h"
 #include "PlayQueue.h"
@@ -1033,6 +1035,260 @@ test_id3_writer()
 }
 
 
+// #pragma mark - DAAP
+
+
+static std::string
+dmap(const char* code, const std::string& data)
+{
+	std::string element(code, 4);
+	uint32_t length = (uint32_t)data.size();
+	element += (char)(length >> 24);
+	element += (char)(length >> 16);
+	element += (char)(length >> 8);
+	element += (char)length;
+	return element + data;
+}
+
+
+static std::string
+dmap_number(const char* code, uint64_t value, int bytes)
+{
+	std::string data;
+	for (int i = bytes - 1; i >= 0; i--)
+		data += (char)(value >> (8 * i));
+	return dmap(code, data);
+}
+
+
+static std::string
+hex(const uint8_t* data, size_t size)
+{
+	std::string text;
+	char digits[3];
+	for (size_t i = 0; i < size; i++) {
+		snprintf(digits, sizeof(digits), "%02x", data[i]);
+		text += digits;
+	}
+	return text;
+}
+
+
+static void
+test_daap_md5()
+{
+	// the real MD5 (RFC 1321's test suite) and iTunes' variant
+	uint8_t digest[16];
+	daap_md5((const uint8_t*)"", 0, false, digest);
+	CHECK_EQ(std::string("d41d8cd98f00b204e9800998ecf8427e"), hex(digest, 16));
+	daap_md5((const uint8_t*)"abc", 3, false, digest);
+	CHECK_EQ(std::string("900150983cd24fb0d6963f7d28e17f72"), hex(digest, 16));
+	const char* digits = "1234567890123456789012345678901234567890"
+		"1234567890123456789012345678901234567890";
+	daap_md5((const uint8_t*)digits, strlen(digits), false, digest);
+	CHECK_EQ(std::string("57edf4a22be3c955ac49da2e2107b67a"), hex(digest, 16));
+	daap_md5((const uint8_t*)"", 0, true, digest);
+	CHECK_EQ(std::string("7d2e48f5dc1e1346c8d16fb6273e2caa"), hex(digest, 16));
+	std::string as(200, 'a');
+	daap_md5((const uint8_t*)as.data(), as.size(), true, digest);
+	CHECK_EQ(std::string("1b2cdefb54825fd45ce4ccc40eda62f2"), hex(digest, 16));
+
+	CHECK_EQ(std::string("77BE0B44D0D6ED1268381859B133B4B9"),
+		daap_validation("/server-info", 0));
+	CHECK_EQ(std::string("E3B047FF11C1F845093E898495A585E2"),
+		daap_validation("/login", 0));
+	CHECK_EQ(std::string("6795220880DFDBBE24A0CD69C96E0205"),
+		daap_validation("/databases/1/items/5.ogg?session-id=123", 11));
+}
+
+
+static void
+test_dmap()
+{
+	std::string item1 = dmap("mlit", dmap_number("miid", 7, 4)
+		+ dmap("minm", "Kaldalón") + dmap_number("astm", 215000, 4)
+		+ dmap_number("astn", 3, 2) + dmap_number("asdk", 0, 1));
+	std::string item2 = dmap("mlit", dmap_number("miid", 8, 4)
+		+ dmap("minm", ""));
+	std::string reply = dmap("adbs", dmap_number("mstt", 200, 4)
+		+ dmap_number("mtco", 2, 4) + dmap("mlcl", item1 + item2));
+
+	DmapReader top((const uint8_t*)reply.data(), reply.size());
+	DmapElement adbs;
+	CHECK(top.Find(dmap_code("adbs"), adbs));
+	CHECK_EQ((uint64_t)200, dmap_child_int(adbs, dmap_code("mstt")));
+	CHECK_EQ((uint64_t)99, dmap_child_int(adbs, dmap_code("none"), 99));
+	DmapElement list;
+	CHECK(DmapReader(adbs).Find(dmap_code("mlcl"), list));
+	DmapReader items(list);
+	DmapElement item;
+	CHECK(items.Next(item));
+	CHECK_EQ(dmap_code("mlit"), item.code);
+	CHECK_EQ((uint64_t)7, dmap_child_int(item, dmap_code("miid")));
+	CHECK_EQ(std::string("Kaldalón"), dmap_child_string(item,
+		dmap_code("minm")));
+	CHECK_EQ((uint64_t)215000, dmap_child_int(item, dmap_code("astm")));
+	CHECK_EQ((uint64_t)3, dmap_child_int(item, dmap_code("astn")));
+	CHECK(items.Next(item));
+	CHECK_EQ((uint64_t)8, dmap_child_int(item, dmap_code("miid")));
+	CHECK_EQ(std::string(), dmap_child_string(item, dmap_code("minm")));
+	CHECK(!items.Next(item));
+
+	// a truncated reply ends the walk instead of reading past it
+	std::string cut = reply.substr(0, reply.size() - 3);
+	DmapReader truncated((const uint8_t*)cut.data(), cut.size());
+	CHECK(!truncated.Next(item));
+	DmapReader empty(NULL, 0);
+	CHECK(!empty.Next(item));
+}
+
+
+static std::string
+dns_name(const char* dotted)
+{
+	std::string name;
+	std::string label;
+	for (const char* c = dotted;; c++) {
+		if (*c == '.' || *c == '\0') {
+			name += (char)label.size();
+			name += label;
+			label.clear();
+			if (*c == '\0')
+				break;
+		} else
+			label += *c;
+	}
+	return name + '\0';
+}
+
+
+static std::string
+dns_record(const std::string& name, uint16_t type, const std::string& data)
+{
+	std::string record = name;
+	record += (char)(type >> 8);
+	record += (char)type;
+	record += std::string("\x80\x01\0\0\x11\x94", 6);
+		// class IN with the cache flush bit, TTL 4500
+	record += (char)(data.size() >> 8);
+	record += (char)data.size();
+	return record + data;
+}
+
+
+static void
+test_mdns()
+{
+	std::vector<DnsQuestion> questions;
+	questions.push_back({ "_daap._tcp.local", kDnsTypePtr });
+	std::string query = dns_query(0x1234, questions);
+	CHECK_EQ(std::string("\x12\x34\0\0\0\x01\0\0\0\0\0\0", 12),
+		query.substr(0, 12));
+	CHECK_EQ(dns_name("_daap._tcp.local") + std::string("\0\x0c\0\x01", 4),
+		query.substr(12));
+
+	// a reply like iTunes': the PTR answer, the rest in the additional
+	// section, names compressed
+	std::string packet("\0\0\x84\0\0\0\0\x01\0\0\0\x03", 12);
+	size_t service = packet.size();
+	std::string instance = std::string("\x0fMy.Library \xe2\x80\x99s")
+		+ std::string("\xc0", 1) + (char)service;
+	packet += dns_record(dns_name("_daap._tcp.local"), kDnsTypePtr, instance);
+	size_t instanceOffset = packet.size() - instance.size();
+	std::string instanceName = std::string("\xc0", 1) + (char)instanceOffset;
+	std::string srv("\0\0\0\0\x0e\x69", 6);
+	srv += dns_name("box.local");
+	packet += dns_record(instanceName, kDnsTypeSrv, srv);
+	std::string text("\x09txtvers=1\x0dPassword=true", 24);
+	packet += dns_record(instanceName, kDnsTypeTxt, text);
+	packet += dns_record(dns_name("box.local"), kDnsTypeA,
+		std::string("\xc0\xa8\x01\x9f", 4));
+
+	std::vector<DnsRecord> records;
+	CHECK(dns_parse_reply((const uint8_t*)packet.data(), packet.size(),
+		records));
+	CHECK_EQ((size_t)4, records.size());
+	if (records.size() == 4) {
+		CHECK_EQ((uint16_t)kDnsTypePtr, records[0].type);
+		CHECK(dns_same_name("_DAAP._tcp.local", records[0].name));
+		CHECK_EQ(std::string("My\\.Library \xe2\x80\x99s._daap._tcp.local"),
+			records[0].target);
+		CHECK_EQ(std::string("My.Library \xe2\x80\x99s"),
+			dns_first_label(records[0].target));
+		CHECK_EQ(records[0].target, records[1].name);
+		CHECK_EQ((uint16_t)3689, records[1].port);
+		CHECK_EQ(std::string("box.local"), records[1].target);
+		std::string value;
+		CHECK(dns_text_value(records[2].text, "password", value));
+		CHECK_EQ(std::string("true"), value);
+		CHECK(!dns_text_value(records[2].text, "Machine Name", value));
+		CHECK_EQ((uint32_t)0xc0a8019f, records[3].address);
+		CHECK_EQ((uint32_t)4500, records[3].ttl);
+	}
+
+	// the name escapes survive a query for the instance
+	questions.clear();
+	questions.push_back({ records.empty() ? std::string() : records[0].target,
+		kDnsTypeSrv });
+	query = dns_query(1, questions);
+	CHECK_EQ(std::string("\x0fMy.Library \xe2\x80\x99s"),
+		query.substr(12, 16));
+
+	// pointer loops, truncation and queries are not replies
+	std::string loop("\0\0\x84\0\0\0\0\x01\0\0\0\0\xc0\x0c\0\x01", 16);
+	records.clear();
+	CHECK(!dns_parse_reply((const uint8_t*)loop.data(), loop.size(),
+		records));
+	CHECK(!dns_parse_reply((const uint8_t*)packet.data(), packet.size() - 2,
+		records));
+	CHECK(!dns_parse_reply((const uint8_t*)query.data(), query.size(),
+		records));
+}
+
+
+static void
+test_http_helpers()
+{
+	CHECK_EQ(std::string("bm9uZTpzZWNyZXQ="), base64_encode("none:secret"));
+	CHECK_EQ(std::string("YQ=="), base64_encode("a"));
+	CHECK_EQ(std::string("YWI="), base64_encode("ab"));
+	CHECK_EQ(std::string(""), base64_encode(""));
+
+	int status = 0;
+	std::map<std::string, std::string> headers;
+	CHECK(http_parse_head("HTTP/1.1 206 Partial Content\r\n"
+		"Content-Length:  1024\r\nContent-Range: bytes 0-1023/5000\r\n"
+		"DAAP-Server: iTunes/4.6\r\n", status, headers));
+	CHECK_EQ(206, status);
+	CHECK_EQ(std::string("1024"), headers["content-length"]);
+	CHECK_EQ(std::string("bytes 0-1023/5000"), headers["content-range"]);
+	CHECK_EQ(std::string("iTunes/4.6"), headers["daap-server"]);
+	CHECK(!http_parse_head("SSH-2.0-OpenSSH\r\n", status, headers));
+	CHECK(!http_parse_head("HTTP/1.0 abc\r\n", status, headers));
+
+	std::string host, path;
+	uint16_t port = 0;
+	CHECK(parse_share_address(" 192.168.1.162 ", host, port, path));
+	CHECK_EQ(std::string("192.168.1.162"), host);
+	CHECK_EQ((uint16_t)3689, port);
+	CHECK(parse_share_address("music.local:3690", host, port, path));
+	CHECK_EQ(std::string("music.local"), host);
+	CHECK_EQ((uint16_t)3690, port);
+	CHECK(parse_share_address("daap://10.0.0.2:3689/databases/1/items/5.mp3",
+		host, port, path));
+	CHECK_EQ(std::string("10.0.0.2"), host);
+	CHECK_EQ(std::string("/databases/1/items/5.mp3"), path);
+	CHECK(parse_share_address("[fe80::1]:4000", host, port, path));
+	CHECK_EQ(std::string("fe80::1"), host);
+	CHECK_EQ((uint16_t)4000, port);
+	CHECK(!parse_share_address("", host, port, path));
+	CHECK(!parse_share_address("host:0", host, port, path));
+	CHECK(!parse_share_address("host:70000", host, port, path));
+	CHECK(!parse_share_address("host:12ab", host, port, path));
+	CHECK(!parse_share_address("my host", host, port, path));
+}
+
+
 int
 main()
 {
@@ -1049,6 +1305,10 @@ main()
 	test_queue_remove();
 	test_equalizer();
 	test_id3_writer();
+	test_daap_md5();
+	test_dmap();
+	test_mdns();
+	test_http_helpers();
 
 	printf("%d checks, %d failures\n", sChecks, sFailures);
 	return sFailures == 0 ? 0 : 1;

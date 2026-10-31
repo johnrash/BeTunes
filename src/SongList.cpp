@@ -334,7 +334,8 @@ SongListView::SongListView(const char* name)
 	:
 	BColumnListView(name, B_NAVIGABLE, B_PLAIN_BORDER, true),
 	fPlayingSong(-1),
-	fFilterAdded(false)
+	fFilterAdded(false),
+	fDragEnabled(true)
 {
 	float size = be_plain_font->Size();
 	struct {
@@ -598,6 +599,9 @@ SongListView::IsInPlaylistOrder()
 bool
 SongListView::InitiateDrag(BPoint where, bool wasSelected)
 {
+	if (!fDragEnabled)
+		return false;
+
 	std::vector<int32> songs;
 	GetSelectedSongs(songs);
 	if (songs.empty())
