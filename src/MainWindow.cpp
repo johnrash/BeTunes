@@ -50,6 +50,11 @@ static const bigtime_t kSaveInterval = 60000000;
 static const bigtime_t kRestartThreshold = 3000000;
 	// "previous" goes back to the start of the song after 3 seconds
 static const bigtime_t kScanStep = 2000000;
+// a key held for Command + > / < scans as a held transport button does
+// (Controls.cpp): after 3 ticks, a step every tick
+static const uint32 kMsgScanTick = 'Bkst';
+static const bigtime_t kScanTickInterval = 150000;
+static const int32 kScanTicksBeforeHold = 3;
 	// fast forward and rewind while the button is held
 static const int32 kVolumeStep = 10;
 
@@ -113,6 +118,45 @@ public:
 			window->PostMessage(kMsgPlayPause);
 		return B_SKIP_MESSAGE;
 	}
+};
+
+
+// Command + > and Command + < fast forward and rewind: one step when
+// pressed, and on and on while held, until that key goes up.
+class ScanKeyFilter : public BMessageFilter {
+public:
+	ScanKeyFilter(MainWindow* window)
+		:
+		BMessageFilter(B_ANY_DELIVERY, B_ANY_SOURCE),
+		fWindow(window)
+	{
+	}
+
+	virtual filter_result Filter(BMessage* message, BHandler** target)
+	{
+		if (message->what == B_KEY_UP) {
+			fWindow->StopKeyScan(message->GetInt32("key", 0));
+			return B_DISPATCH_MESSAGE;
+		}
+		const char* bytes;
+		if (message->what != B_KEY_DOWN
+			|| message->FindString("bytes", &bytes) != B_OK
+			|| (bytes[0] != '>' && bytes[0] != '<'))
+			return B_DISPATCH_MESSAGE;
+		uint32 modifiers = message->GetInt32("modifiers", 0);
+		if ((modifiers & B_COMMAND_KEY) == 0
+			|| (modifiers & (B_CONTROL_KEY | B_OPTION_KEY)) != 0)
+			return B_DISPATCH_MESSAGE;
+		// the key's own repeats change nothing: the scan has its pace
+		if (message->GetInt32("be:key_repeat", 0) == 0) {
+			fWindow->StartKeyScan(bytes[0] == '>' ? 1 : -1,
+				message->GetInt32("key", 0));
+		}
+		return B_SKIP_MESSAGE;
+	}
+
+private:
+	MainWindow*	fWindow;
 };
 
 
@@ -247,6 +291,10 @@ MainWindow::MainWindow(const BMessage& settings)
 	fTickRunner(NULL),
 	fRefreshRunner(NULL),
 	fSaveRunner(NULL),
+	fScanRunner(NULL),
+	fScanKey(0),
+	fScanDirection(0),
+	fScanTicks(0),
 	fEqualizerPreset("Flat"),
 	fEqualizerVisible(false),
 	fEqualizerButton(NULL),
@@ -262,6 +310,7 @@ MainWindow::MainWindow(const BMessage& settings)
 
 	_BuildLayout();
 	AddCommonFilter(new SpaceFilter);
+	AddCommonFilter(new ScanKeyFilter(this));
 	AddCommonFilter(new MiniPlayerMenuFilter(this));
 
 	fSortStates[SOURCE_LIBRARY] = sort_state(COLUMN_ARTIST, true);
@@ -288,6 +337,7 @@ MainWindow::~MainWindow()
 	delete fTickRunner;
 	delete fRefreshRunner;
 	delete fSaveRunner;
+	delete fScanRunner;
 
 	delete fPlayer;
 	fImporter->Cancel();
@@ -298,6 +348,44 @@ MainWindow::~MainWindow()
 	if (fTagWriter->Lock())
 		fTagWriter->Quit();
 	delete fFilePanel;
+}
+
+
+void
+MainWindow::WindowActivated(bool active)
+{
+	// a key let go in another window would never stop it
+	if (!active)
+		StopKeyScan(-1);
+	BWindow::WindowActivated(active);
+}
+
+
+void
+MainWindow::StartKeyScan(int32 direction, int32 key)
+{
+	StopKeyScan(-1);
+	BMessage scan(kMsgScan);
+	scan.AddInt32("direction", direction);
+	PostMessage(&scan);
+
+	fScanKey = key;
+	fScanDirection = direction;
+	fScanTicks = 0;
+	BMessage tick(kMsgScanTick);
+	fScanRunner = new BMessageRunner(BMessenger(this), &tick,
+		kScanTickInterval);
+}
+
+
+/*!	\a key went up: the scan it started ends (-1: any scan). */
+void
+MainWindow::StopKeyScan(int32 key)
+{
+	if (fScanRunner == NULL || (key >= 0 && key != fScanKey))
+		return;
+	delete fScanRunner;
+	fScanRunner = NULL;
 }
 
 
@@ -522,6 +610,13 @@ MainWindow::_BuildMenuBar()
 		B_RIGHT_ARROW));
 	menu->AddItem(new BMenuItem("Previous Song", new BMessage(kMsgPrevious),
 		B_LEFT_ARROW));
+	// the keys themselves go through ScanKeyFilter, to scan while held
+	BMessage* forward = new BMessage(kMsgScan);
+	forward->AddInt32("direction", 1);
+	menu->AddItem(new BMenuItem("Fast Forward", forward, '>'));
+	BMessage* rewind = new BMessage(kMsgScan);
+	rewind->AddInt32("direction", -1);
+	menu->AddItem(new BMenuItem("Rewind", rewind, '<'));
 	menu->AddSeparatorItem();
 	menu->AddItem(new BMenuItem("Volume Up", new BMessage(kMsgVolumeUp),
 		B_UP_ARROW));
@@ -724,6 +819,13 @@ MainWindow::MessageReceived(BMessage* message)
 				bigtime_t time = fPlayer->Position()
 					+ message->GetInt32("direction", 1) * kScanStep;
 				fPlayer->Seek(std::max((bigtime_t)0, time));
+			}
+			break;
+		case kMsgScanTick:
+			if (fScanRunner != NULL && ++fScanTicks >= kScanTicksBeforeHold) {
+				BMessage scan(kMsgScan);
+				scan.AddInt32("direction", fScanDirection);
+				PostMessage(&scan);
 			}
 			break;
 		case kMsgSeek:

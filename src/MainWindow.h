@@ -56,7 +56,15 @@ public:
 	virtual	void				Zoom(BPoint origin, float width,
 									float height);
 
+	virtual	void				WindowActivated(bool active);
+
 			bool				IsMiniPlayer() const { return fMiniPlayer; }
+
+	// Command + > / <: a 2 s scan at once, and while the key is held the
+	// scan of a held next or previous button; any key going up that is
+	// not this one leaves it running
+			void				StartKeyScan(int32 direction, int32 key);
+			void				StopKeyScan(int32 key);
 
 private:
 			void				_BuildLayout();
@@ -242,6 +250,12 @@ private:
 			BMessageRunner*		fTickRunner;
 			BMessageRunner*		fRefreshRunner;
 			BMessageRunner*		fSaveRunner;
+
+			// a scan held on the keyboard
+			BMessageRunner*		fScanRunner;
+			int32				fScanKey;
+			int32				fScanDirection;
+			int32				fScanTicks;
 
 			// equalizer
 			struct UserPreset {

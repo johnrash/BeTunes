@@ -187,6 +187,7 @@ a mini player, and the brushed toolbar with its status "LCD".
 | Space | play / pause (when not typing) |
 | Enter, double-click | play the selected song |
 | Command + → / ← | next / previous song |
+| Command + > / < | fast forward / rewind 2 s; held, they scan as a held next or previous button does |
 | Command + . | stop |
 | Command + ↑ / ↓, Command + M | volume up / down, mute |
 | Command + L | show the current song |
