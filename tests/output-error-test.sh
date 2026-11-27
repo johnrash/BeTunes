@@ -3,11 +3,16 @@
 # Haiku; on a machine without sound hardware the system mixer cannot take
 # the connection). BeTunes must stay responsive, stop and say why.
 #   bash tests/output-error-test.sh [BeTunes executable] [music folder]
+# paths are taken relative to where the test is started from
+APP=${1:-}
+MUSIC=${2:-}
+case "$APP" in ""|/*) ;; *) APP="$(pwd)/$APP" ;; esac
+case "$MUSIC" in ""|/*) ;; *) MUSIC="$(pwd)/$MUSIC" ;; esac
 cd "$(dirname "$0")"
 . ./hey-lib.sh
 HEY_APP=application/x-vnd.BeTunes
-APP=${1:-../objects.x86_64-cc13-release/BeTunes}
-MUSIC=${2:-/boot/home/BeTunesTest/music}
+APP=${APP:-$(pwd)/../objects.x86_64-cc13-release/BeTunes}
+MUSIC=${MUSIC:-/boot/home/BeTunesTest/music}
 unset BETUNES_AUDIO
 
 st() {

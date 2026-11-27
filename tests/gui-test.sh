@@ -4,12 +4,16 @@
 # The music folder is made by tests/make-test-music.sh. The test plays
 # through the silent audio output, so it works without sound hardware. The
 # user's BeTunes settings and library are moved aside and restored.
+# paths are taken relative to where the test is started from
+APP=${1:-}
+MUSIC=${2:-}
+case "$APP" in ""|/*) ;; *) APP="$(pwd)/$APP" ;; esac
+case "$MUSIC" in ""|/*) ;; *) MUSIC="$(pwd)/$MUSIC" ;; esac
 cd "$(dirname "$0")"
 . ./hey-lib.sh
 HEY_APP=application/x-vnd.BeTunes
-APP=${1:-../objects.x86_64-cc13-release/BeTunes}
-case "$APP" in /*) ;; *) APP="$(pwd)/$APP" ;; esac
-MUSIC=${2:-/boot/home/BeTunesTest/music}
+APP=${APP:-$(pwd)/../objects.x86_64-cc13-release/BeTunes}
+MUSIC=${MUSIC:-/boot/home/BeTunesTest/music}
 SETTINGS="$(finddir B_USER_SETTINGS_DIRECTORY)/BeTunes"
 SCRATCH=/tmp/betunes-test
 export BETUNES_AUDIO=silent

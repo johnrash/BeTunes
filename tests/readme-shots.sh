@@ -3,12 +3,17 @@
 # test music and prints the window frame for cropping. Uses its own
 # settings (the user's are moved aside and restored).
 #   bash tests/readme-shots.sh [BeTunes executable] [music folder]
+# paths are taken relative to where the test is started from
+APP=${1:-}
+MUSIC=${2:-}
+case "$APP" in ""|/*) ;; *) APP="$(pwd)/$APP" ;; esac
+case "$MUSIC" in ""|/*) ;; *) MUSIC="$(pwd)/$MUSIC" ;; esac
 cd "$(dirname "$0")"
 . ./hey-lib.sh
 A=application/x-vnd.BeTunes
 HEY_APP=$A
-APP=${1:-../objects.x86_64-cc13-release/BeTunes}
-MUSIC=${2:-/boot/home/BeTunesTest/music}
+APP=${APP:-$(pwd)/../objects.x86_64-cc13-release/BeTunes}
+MUSIC=${MUSIC:-/boot/home/BeTunesTest/music}
 SETTINGS="$(finddir B_USER_SETTINGS_DIRECTORY)/BeTunes"
 export BETUNES_AUDIO=silent
 

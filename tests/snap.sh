@@ -3,11 +3,16 @@
 # (with the silent audio output unless BETUNES_AUDIO is set), optionally
 # imports a folder and waits for the import, then takes a screenshot.
 #   tests/snap.sh /tmp/shot.png [folder to import]
+# paths are taken relative to where it is started from
+OUT=${1:-/tmp/betunes.png}
+IMPORT=${2:-}
+case "${APP:-}" in ""|/*) ;; *) APP="$(pwd)/$APP" ;; esac
+case "$OUT" in /*) ;; *) OUT="$(pwd)/$OUT" ;; esac
+case "$IMPORT" in ""|/*) ;; *) IMPORT="$(pwd)/$IMPORT" ;; esac
 cd "$(dirname "$0")"
 . ./hey-lib.sh
 HEY_APP=application/x-vnd.BeTunes
-APP=${APP:-../objects.x86_64-cc13-release/BeTunes}
-OUT=${1:-/tmp/betunes.png}
+APP=${APP:-$(pwd)/../objects.x86_64-cc13-release/BeTunes}
 export BETUNES_AUDIO=${BETUNES_AUDIO:-silent}
 
 if ! roster | grep -q BeTunes; then
@@ -15,8 +20,8 @@ if ! roster | grep -q BeTunes; then
 	waitfor -m $HEY_APP
 fi
 
-if [ -n "$2" ]; then
-	hey $HEY_APP Bimp of Window 0 with path="\"$2\"" >/dev/null
+if [ -n "$IMPORT" ]; then
+	hey $HEY_APP Bimp of Window 0 with path="\"$IMPORT\"" >/dev/null
 	for i in $(seq 1 120); do
 		hey $HEY_APP Bsta of Window 0 | grep -q '"importing" (B_BOOL_TYPE) : FALSE' && break
 		sleep 0.5
