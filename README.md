@@ -318,6 +318,19 @@ iTunes:
 
     python3 tests/daap-test-server.py --address 10.0.0.1 --dir ~/music --password secret
 
+`tests/daap-test.sh` drives BeTunes against that server with `hey` (19
+checks: finding the library through multicast DNS, a wrong and then the
+right password, the songs listed, playing a song, seeking ahead in it,
+disconnecting). It uses the silent output and its own settings. Run the
+server on another machine on the same network, with the test music in one
+folder and slowly, so that seeking to 80 % of the WAV song reads past what
+has arrived and BeTunes fetches that part on its own (206 in the server's
+log):
+
+    mkdir ~/shared && find music -type f -exec cp {} ~/shared/ \;
+    python3 tests/daap-test-server.py --address 10.0.0.1 --dir ~/shared --password secret --rate 30000
+    bash tests/daap-test.sh 10.0.0.1 secret objects.x86_64-cc13-release/BeTunes   # on Haiku
+
 ## Scripting
 
 Every command can be sent with `hey`; BeTunes replies when it is done.
